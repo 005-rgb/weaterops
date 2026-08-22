@@ -47,6 +47,10 @@ Perintah ini idempoten dan tidak menghapus activity yang sudah ada. Response API
 live tidak dianggap seed permanen karena memiliki retention dan expiry; bila
 histori jangka panjang diperlukan, lakukan backup/restore database terpisah.
 
+Provider API dapat dikelola melalui `GET/POST /api/v1/weather/sources`,
+`PATCH /api/v1/weather/sources/:id`, dan `DELETE /api/v1/weather/sources/:id`.
+Delete bersifat soft-delete (`enabled=false`) sehingga histori tidak hilang.
+
 Phase 0 hanya menyediakan scaffold, database migration PostGIS, middleware
 dasar, dan endpoint health check. Logika bisnis dan integrasi BMKG belum
 diimplementasikan.

@@ -31,6 +31,18 @@ pada `DATABASE_URL` milik workspace atau akun Replit lain. Data forecast live
 tetap merupakan data historis dengan masa berlaku dan tidak diperlakukan sebagai
 seed permanen.
 
+Provider dapat dilihat dan dikelola melalui:
+
+```text
+GET    /api/v1/weather/sources
+POST   /api/v1/weather/sources
+PATCH  /api/v1/weather/sources/:id
+DELETE /api/v1/weather/sources/:id
+```
+
+`DELETE` menonaktifkan provider secara aman dan mempertahankan seluruh histori
+respons API untuk audit atau migrasi.
+
 The health endpoint is available at `GET /api/v1/system/health`.
 
 ## Phase 1 database model

@@ -30,6 +30,16 @@ export type RawResponseLogger = (entry: {
   status: number | 'network_error' | 'timeout';
   body: unknown;
 }) => void;
+export type ApiResponseRecorder = (entry: {
+  locationCode: string;
+  requestUrl: string;
+  status: number | null;
+  body: unknown;
+  success: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+  durationMs: number;
+}) => Promise<void> | void;
 
 export type BmkgErrorCode =
   | 'BMKG_NOT_CONFIGURED'
@@ -58,15 +68,23 @@ export interface BmkgClientOptions {
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   logger?: RawResponseLogger;
+  responseRecorder?: ApiResponseRecorder;
   now?: () => number;
 }
 
 export class BmkgClient {
   private readonly requestTimes: number[] = [];
-  private readonly options: Required<Omit<BmkgClientOptions, 'baseUrl' | 'fetchImpl' | 'logger'>>;
+  private readonly options: {
+    timeoutMs: number;
+    maxRetries: number;
+    rateLimitPerMinute: number;
+    sleep: (ms: number) => Promise<void>;
+    now: () => number;
+  };
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string | undefined;
   private readonly logger: RawResponseLogger;
+  private readonly responseRecorder?: ApiResponseRecorder;
 
   constructor(options: BmkgClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? env.BMKG_BASE_URL;
@@ -74,6 +92,7 @@ export class BmkgClient {
     this.logger = options.logger ?? ((entry) => {
       console.log(JSON.stringify({ level: 'info', event: 'bmkg_raw_response', ...entry }));
     });
+    this.responseRecorder = options.responseRecorder;
     this.options = {
       timeoutMs: options.timeoutMs ?? env.BMKG_TIMEOUT_MS,
       maxRetries: options.maxRetries ?? 2,
@@ -94,12 +113,19 @@ export class BmkgClient {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
       try {
+        const startedAt = this.options.now();
         const response = await this.fetchImpl(url, { signal: controller.signal });
         const text = await response.text();
         let body: unknown = text;
         try { body = JSON.parse(text); } catch { /* raw text is retained for forensics */ }
         this.logger({ locationCode, status: response.status, body });
         if (!response.ok) {
+          await this.responseRecorder?.({
+            locationCode, requestUrl: url.toString(), status: response.status, body,
+            success: false, errorCode: 'BMKG_HTTP_ERROR',
+            errorMessage: `BMKG returned HTTP ${response.status}`,
+            durationMs: Math.max(0, this.options.now() - startedAt),
+          });
           lastError = new BmkgError('BMKG_HTTP_ERROR', `BMKG returned HTTP ${response.status}`, body);
           if (response.status < 500) throw lastError;
           if (attempt < this.options.maxRetries) await this.backoff(attempt);
@@ -107,15 +133,30 @@ export class BmkgClient {
         }
         const parsed = bmkgResponseSchema.safeParse(body);
         if (!parsed.success) {
+          await this.responseRecorder?.({
+            locationCode, requestUrl: url.toString(), status: response.status, body,
+            success: false, errorCode: 'BMKG_SCHEMA_VALIDATION_FAILED',
+            errorMessage: 'BMKG response does not match the assumed schema',
+            durationMs: Math.max(0, this.options.now() - startedAt),
+          });
           alertSchemaValidationFailure(locationCode, parsed.error.issues);
           throw new BmkgError('BMKG_SCHEMA_VALIDATION_FAILED', 'BMKG response does not match the assumed schema', parsed.error.issues);
         }
         recordSchemaResult(true);
+        await this.responseRecorder?.({
+          locationCode, requestUrl: url.toString(), status: response.status, body,
+          success: true, durationMs: Math.max(0, this.options.now() - startedAt),
+        });
         return parsed.data;
       } catch (error) {
         if (error instanceof BmkgError) throw error;
         lastError = error;
         const timeout = error instanceof Error && error.name === 'AbortError';
+        await this.responseRecorder?.({
+          locationCode, requestUrl: url.toString(), status: null, body: String(error),
+          success: false, errorCode: timeout ? 'BMKG_TIMEOUT' : 'BMKG_NETWORK_ERROR',
+          errorMessage: 'BMKG request failed', durationMs: 0,
+        });
         this.logger({ locationCode, status: timeout ? 'timeout' : 'network_error', body: String(error) });
         if (attempt < this.options.maxRetries) {
           await this.backoff(attempt);

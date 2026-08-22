@@ -25,7 +25,7 @@ export interface WeatherApiResponse {
   error_message: string | null;
   duration_ms: number | null;
   fetched_at: Date;
-  expires_at: Date;
+  expires_at: Date | null;
 }
 
 export const weatherSnapshotsRepository: Repository<WeatherSnapshot> = createRepository(
@@ -56,6 +56,24 @@ export interface WeatherSlotRepository {
 export interface WeatherApiResponseRepository {
   create(data: Partial<WeatherApiResponse>): Promise<WeatherApiResponse>;
 }
+
+export interface WeatherSource {
+  id: string;
+  code: string;
+  provider_type: 'domestic' | 'international';
+  display_name: string;
+  adapter_key: string;
+  base_url: string | null;
+  config: unknown;
+  enabled: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export const weatherSourcesRepository = createRepository<WeatherSource>(
+  'weather_sources',
+  ['code', 'provider_type', 'display_name', 'adapter_key', 'base_url', 'config', 'enabled'],
+);
 
 export const weatherSnapshotStore: WeatherSnapshotRepository = {
   async findLatestByLocation(locationCode) {

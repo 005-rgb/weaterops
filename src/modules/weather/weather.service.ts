@@ -73,12 +73,6 @@ export class WeatherService {
     const sourceUpdatedAt = getSourceUpdatedAt(raw);
     let snapshot: WeatherSnapshot;
     try {
-      await this.options.apiResponses?.create({
-        source_code: this.options.sourceCode ?? 'BMKG',
-        location_code: locationCode,
-        response_body: raw,
-        success: true,
-      });
       snapshot = await this.options.snapshots.create({
         location_code: locationCode,
         source: this.options.sourceCode ?? 'BMKG',
@@ -118,9 +112,23 @@ export class WeatherService {
   }
 }
 
-export function createWeatherService(client = new BmkgClient()) {
+export function createWeatherService(client?: BmkgClient) {
+  const recordingClient = client ?? new BmkgClient({
+    responseRecorder: (entry) => weatherApiResponseStore.create({
+        source_code: 'BMKG',
+        location_code: entry.locationCode,
+        request_url: entry.requestUrl,
+        http_status: entry.status,
+        response_body: typeof entry.body === 'object' ? entry.body : null,
+        response_text: typeof entry.body === 'string' ? entry.body : null,
+        success: entry.success,
+        error_code: entry.errorCode ?? null,
+        error_message: entry.errorMessage ?? null,
+        duration_ms: entry.durationMs,
+      }).then(() => undefined),
+  });
   return new WeatherService({
-    client,
+    client: recordingClient,
     snapshots: weatherSnapshotStore,
     slots: weatherSlotStore,
     apiResponses: weatherApiResponseStore,

@@ -4,6 +4,7 @@ export interface Repository<T> {
   findById(id: string): Promise<T | null>;
   create(data: Partial<T>): Promise<T>;
   findMany(filter?: Partial<T>): Promise<T[]>;
+  update(id: string, data: Partial<T>): Promise<T | null>;
 }
 
 export function createRepository<T>(
@@ -46,6 +47,17 @@ export function createRepository<T>(
         values,
       );
       return result.rows as T[];
+    },
+    async update(id, data) {
+      const entries = Object.entries(data).filter(([key]) => allowed.has(key));
+      if (entries.length === 0) return this.findById(id);
+      const values = entries.map(([, value]) => value);
+      const set = entries.map(([key], index) => `"${key}" = $${index + 1}`).join(', ');
+      const result = await pool.query(
+        `UPDATE ${quotedTable} SET ${set} WHERE id = $${values.length + 1} RETURNING *`,
+        [...values, id],
+      );
+      return (result.rows[0] as T | undefined) ?? null;
     },
   };
 }
