@@ -37,10 +37,13 @@ try {
      ON CONFLICT (code, version) DO UPDATE SET name_id = EXCLUDED.name_id, name_en = EXCLUDED.name_en
      RETURNING id`,
   );
-  await pool.query(`DELETE FROM activities WHERE activity_profile_code = 'CONCRETE_POUR'`);
   await pool.query(
     `INSERT INTO activities (activity_profile_code, name_id, name_en)
-     VALUES ('CONCRETE_POUR', 'Pengecoran Beton', 'Concrete Pour')`,
+      VALUES ('CONCRETE_POUR', 'Pengecoran Beton', 'Concrete Pour')
+      ON CONFLICT (activity_profile_code) DO UPDATE SET
+        name_id = EXCLUDED.name_id,
+        name_en = EXCLUDED.name_en,
+        active = true`,
   );
   await pool.query('COMMIT');
   console.log(JSON.stringify({ level: 'info', event: 'dev_seed_complete', profile_id: profile.rows[0]?.id }));

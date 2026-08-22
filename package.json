@@ -12,6 +12,7 @@
     "start": "node dist/server.js",
     "db:migrate": "node-pg-migrate -m src/infrastructure/database/migrations up",
     "seed:dev": "tsx scripts/seed-dev.ts",
+    "db:bootstrap": "npm run db:migrate && npm run seed:dev",
     "bmkg:contract": "tsx scripts/bmkg-contract-test.ts",
     "test": "vitest run",
     "test:watch": "vitest",

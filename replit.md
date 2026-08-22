@@ -34,6 +34,19 @@ digunakan cache tetap disimpan di `weather_snapshots`. Provider baru sebaiknya
 mengikuti kontrak `WeatherProvider` dan mendaftarkan `code` serta `adapter_key`
 tanpa mengubah tabel inti.
 
+## Memulihkan baseline saat pindah akun
+
+Baseline referensi disimpan di migration dan seed yang ikut masuk Git. Pada
+workspace atau akun baru, isi `DATABASE_URL` dengan database tujuan lalu jalankan:
+
+```bash
+npm run db:bootstrap
+```
+
+Perintah ini idempoten dan tidak menghapus activity yang sudah ada. Response API
+live tidak dianggap seed permanen karena memiliki retention dan expiry; bila
+histori jangka panjang diperlukan, lakukan backup/restore database terpisah.
+
 Phase 0 hanya menyediakan scaffold, database migration PostGIS, middleware
 dasar, dan endpoint health check. Logika bisnis dan integrasi BMKG belum
 diimplementasikan.

@@ -20,6 +20,17 @@ npm run seed:dev
 npm run dev
 ```
 
+Untuk membuat database baru dengan baseline referensi yang sama:
+
+```bash
+npm run db:bootstrap
+```
+
+Migration dan seed referensi tersimpan di Git sehingga dapat dijalankan ulang
+pada `DATABASE_URL` milik workspace atau akun Replit lain. Data forecast live
+tetap merupakan data historis dengan masa berlaku dan tidak diperlakukan sebagai
+seed permanen.
+
 The health endpoint is available at `GET /api/v1/system/health`.
 
 ## Phase 1 database model
