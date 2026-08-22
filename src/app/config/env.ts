@@ -19,7 +19,13 @@ const envSchema = z.object({
 export type Env = z.infer<typeof envSchema>;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  const result = envSchema.safeParse(source);
+  // dotenv keeps empty assignments as "", which would coerce to 0 and
+  // bypass Zod defaults for numeric optional settings.
+  const normalizedSource = {
+    ...source,
+    BMKG_RATE_LIMIT_PER_MIN: source.BMKG_RATE_LIMIT_PER_MIN?.trim() || undefined,
+  };
+  const result = envSchema.safeParse(normalizedSource);
   if (!result.success) {
     const message = result.error.issues
       .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
