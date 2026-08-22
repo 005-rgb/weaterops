@@ -13,6 +13,7 @@ const envSchema = z.object({
   WEATHER_FRESHNESS_MINUTES: z.coerce.number().positive().default(60),
   TURNSTILE_SECRET_KEY: z.string().optional(),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  BOUNDARY_SIMPLIFY_TOLERANCE: z.coerce.number().positive().default(0.001),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -1,0 +1,201 @@
+# FASE 6 — Geospasial (PostGIS Resolve + Peta Operasional)
+
+**Prasyarat:** Fase 1 (tabel `locations.geometry` + GIST index), Fase 5 (i18n
+untuk label UI peta).
+**Output fase ini:** Backend geospasial (§7a) lengkap + frontend Mode A (location
+picker peta) dan Mode B (tracking dashboard peta) sesuai §42a. Ini gap kritis
+terbesar hasil tinjauan independen (skor 20/100) — kerjakan dengan sangat teliti.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 6 dari 11 fase pembangunan WeatherOps. Kamu membangun modul `geospatial` —
+backend point-in-polygon resolution DAN frontend peta interaktif dua-mode. Prinsip
+mutlak (§2.8 Spatial Honesty, §7.3): peta HANYA alat bantu input dan visualisasi.
+Backend tetap SATU-SATUNYA otoritas skor. Modul `geospatial` TIDAK PERNAH menghitung
+ulang risk score — dia hanya lookup dan agregasi tampilan.
+
+## BAGIAN BACKEND
+
+### 1. Boundary data (§7a.2)
+- Untuk fase ini, gunakan data boundary yang TERSEDIA secara terbuka dari sumber
+  resmi (Kemendagri/BIG) untuk WILAYAH TERBATAS yang sama dengan seed data Fase 1
+  (jangan mencoba import boundary nasional penuh sekarang — itu pekerjaan data
+  engineering terpisah di luar scope satu sesi coding). Untuk wilayah di luar seed,
+  IMPLEMENTASIKAN fallback eksplisit ke dropdown adm4 tekstual (lihat poin 5) —
+  JANGAN blokir analisis hanya karena boundary tidak tersedia untuk suatu wilayah.
+- Simpan `boundary_source` di setiap baris `locations` yang diisi geometry-nya
+  (mis. `'kemendagri_2024_sample'` untuk data contoh fase ini, TANDAI eksplisit
+  bahwa ini BUKAN data boundary nasional lengkap, hanya sample untuk development).
+- Jika data desa/kelurahan (adm4) resmi tidak tersedia terbuka untuk suatu
+  wilayah, isi `geometry` di level adm3 (kecamatan) untuk wilayah itu dan SET
+  `resolution_level` hasil resolve menjadi `'adm3'` — jangan pernah berpura-pura
+  presisi adm4 padahal datanya adm3.
+
+### 2. Endpoint: `GET /api/v1/locations/resolve?lat=..&lng=..`
+- Jalankan `ST_Contains(geometry, ST_SetSRID(ST_MakePoint(lng, lat), 4326))`
+  terhadap tabel `locations` level adm4 (§7a.4) — PERHATIKAN urutan lng,lat di
+  `ST_MakePoint` (longitude dulu, PostGIS convention), ini kesalahan umum, cek
+  ulang.
+- Jika tidak ditemukan poligon adm4 yang cocok, fallback berjenjang: coba adm3,
+  lalu adm2, lalu adm1 (query terpisah per level, atau query gabungan dengan
+  `UNION` terurut prioritas — pilih pendekatan yang paling jelas dibaca).
+- Response:
+  ```json
+  { "locationCode": "string", "name": "string", "fullName": "string",
+    "resolutionLevel": "adm4|adm3|adm2|adm1" }
+  ```
+- Jika benar-benar tidak ada poligon apa pun yang cocok (titik di luar wilayah
+  Indonesia atau di laut jauh dari boundary manapun) -> 404
+  `LOCATION_RESOLUTION_FAILED`.
+- **Test performa wajib**: query ini harus p95 < 150ms pada dataset yang ada
+  (§7a.5) — tulis benchmark test sederhana (jalankan 100x, ukur p95) dan
+  laporkan hasilnya. Jika index GIST tidak aktif atau query plan tidak
+  memakainya (cek dengan `EXPLAIN ANALYZE`), perbaiki sebelum lanjut.
+
+### 3. Endpoint: `GET /api/v1/locations/:adm4/boundary`
+- Kembalikan GeoJSON dari `geometry_simplified` (BUKAN `geometry` mentah — payload
+  harus < 50KB rata-rata per polygon, §7a.5).
+- Jika `geometry_simplified` NULL (belum pernah disederhanakan), generate on-the-fly
+  dengan `ST_SimplifyPreserveTopology` (toleransi configurable via env
+  `BOUNDARY_SIMPLIFY_TOLERANCE`, default aman mis. 0.001 derajat — dokumentasikan
+  trade-off presisi vs ukuran) dan SIMPAN hasilnya ke `geometry_simplified` supaya
+  request berikutnya tidak menghitung ulang (cache-on-write).
+- Jika `adm4` tidak ditemukan atau tidak punya geometry sama sekali -> 404
+  `BOUNDARY_UNAVAILABLE` (bukan 500 — ini kondisi yang DIHARAPKAN terjadi untuk
+  wilayah yang datanya belum lengkap, frontend harus fallback dengan baik ke
+  poin 5 di bawah, bukan crash).
+
+### 4. Endpoint: `GET /api/v1/locations/search?q=..`
+- Geocoding lokal SEDERHANA: `ILIKE '%query%'` terhadap `locations.name` dan
+  `locations.full_name`, level adm4 diprioritaskan, urutkan hasil yang cocok di
+  awal string lebih tinggi (mis. `ILIKE 'query%'` diberi skor lebih tinggi
+  daripada `ILIKE '%query%'` di tengah).
+- Terima parameter opsional `viewportLat`/`viewportLng` untuk prioritas kedekatan
+  (§42a.1: "hasil diprioritaskan oleh kedekatan ke viewport peta saat ini") —
+  jika diberikan, urutkan hasil dengan bobot gabungan text-match + jarak
+  `ST_Distance` ke titik viewport (implementasi sederhana: text match dulu untuk
+  filter, lalu distance untuk sorting sekunder di antara hasil yang match).
+- Batasi hasil maksimum 10, response array `{ code, name, fullName, level }`.
+
+### 5. Fallback textual dropdown (WAJIB, bukan opsional — §7a.2, §42a.1, §85 larangan)
+- Buat endpoint yang MEMUNGKINKAN pemilihan lokasi TANPA peta sama sekali:
+  `GET /api/v1/locations?level=adm1` -> daftar provinsi,
+  `GET /api/v1/locations?level=adm2&parentCode=..` -> daftar kabupaten dalam
+  provinsi tsb, dst berjenjang (adm3, adm4) — ini pola dropdown bertingkat v2.0
+  §10 yang HARUS tetap ada dan berfungsi PENUH, bukan hiasan. Backend Fase 4
+  (`POST /analyses`) sudah menerima `locationCode` langsung, jadi endpoint ini
+  murni untuk membantu UI memilih kode yang valid.
+
+## BAGIAN FRONTEND
+
+### 6. Setup dasar frontend (React + MapLibre GL JS, §8.7)
+- Jika belum ada scaffold frontend dari fase sebelumnya, buat sekarang:
+  React + Vite, struktur `src/frontend/`, terhubung ke backend via fetch/axios
+  ke `/api/v1/*`.
+- Install `maplibre-gl` + `react-map-gl` (atau binding React resmi MapLibre yang
+  kamu anggap paling stabil, dokumentasikan pilihan).
+- Tile source: gunakan provider vector tile yang mengizinkan penggunaan gratis
+  dengan atribusi untuk development (mis. tile demo MapLibre/OpenFreeMap) —
+  TANDAI eksplisit di kode dan di laporan akhir bahwa pemilihan tile source
+  PRODUKSI final (self-hosted vs provider berbayar/gratis dengan syarat) WAJIB
+  dikonfirmasi manusia sebelum go-live (§8.7 menyebutkan ini eksplisit perlu
+  konfirmasi terpisah).
+
+### 7. Mode A — Map sebagai Location Picker (§42a.1)
+- Komponen `<LocationPickerMap />`: render peta, tampilkan boundary adm4 sebagai
+  layer polygon dari `GET /locations/:adm4/boundary` (load boundary untuk area
+  yang sedang terlihat di viewport, bukan semua sekaligus — lakukan lazy-load per
+  viewport bounds).
+- Tap/klik pada peta -> ambil koordinat klik -> panggil
+  `GET /locations/resolve?lat=..&lng=..` -> auto-fill form lokasi dengan hasil,
+  DAN tampilkan `resolutionLevel` secara TRANSPARAN ke user (mis. badge kecil
+  "Presisi: Kecamatan" jika adm3, bukan disembunyikan) — ini wajib sesuai §2.4
+  no false precision.
+- Search box di atas peta terhubung ke `GET /locations/search`, hasil klik ->
+  auto pan+zoom peta ke lokasi + trigger resolve yang sama seperti tap.
+- Toggle/tab untuk beralih ke dropdown teks bertingkat (poin 5 backend) sebagai
+  ALTERNATIF SETARA, bukan tersembunyi di menu sekunder — ini wajib aksesibilitas
+  (§44) dan wajib sebagai fallback saat tile gagal load (poin 9 di bawah).
+
+### 8. Mode B — Map sebagai Tracking/Monitoring Dashboard (§42a.2)
+- Komponen `<TrackingMap />`: terima daftar analysis aktif (untuk fase ini,
+  terima sebagai PROPS dari data dummy/mock KARENA session board belum ada
+  sampai Fase 7 — buat komponen ini SIAP menerima data nyata dengan interface
+  yang jelas, tapi test dengan data mock sekarang, integrasi nyata ke session
+  board dilakukan sebagai bagian Fase 7).
+- Marker WARNA per `risk_label`: Rendah=hijau, Sedang=kuning, Tinggi=oranye,
+  Sangat Tinggi=merah.
+- Marker BENTUK per status (WAJIB, bukan opsional — §44 no color-only
+  information): Rendah=lingkaran, Sedang=segitiga, Tinggi=persegi, Sangat
+  Tinggi=diamond dengan tanda seru. Implementasikan sebagai custom marker
+  icon/SVG per kombinasi warna+bentuk, JANGAN hanya warna dengan bentuk sama.
+- Klik marker -> popup/bottom-sheet ringkas (decision status, jendela waktu,
+  confidence) + link ke report lengkap (`/reports/:publicToken`).
+- Heatmap opsional (layer togglable) mengagregasi `hazard_score` dari
+  `weather_slots` per adm4 dalam radius — untuk fase ini, buat endpoint backend
+  pendukung `GET /api/v1/geospatial/hazard-heatmap?bounds=..` yang mengagregasi
+  rata-rata `hazard_score` per adm4 dalam bounding box, dan render sebagai layer
+  heatmap MapLibre. WAJIB beri label eksplisit di UI (legend/caption) bahwa ini
+  agregasi HAZARD CUACA, bukan skor risiko proyek, untuk mencegah kebingungan
+  dengan skor keputusan per-proyek (§2.4, §42a.2).
+
+### 9. Responsive & accessibility (§42a.3, §44)
+- Mobile: peta full-width, kontrol zoom/legend collapsible, bottom-sheet untuk
+  detail marker (bukan modal full-screen yang menutupi peta sepenuhnya).
+- Desktop: peta + panel data berdampingan (split view, bukan tab terpisah).
+- WAJIB: alternatif list-view teks lengkap untuk screen reader — setiap marker
+  di Mode B harus PUNYA representasi setara sebagai baris list HTML biasa
+  (status, lokasi, waktu, confidence dalam teks) yang terhubung dengan ARIA yang
+  benar, BUKAN hanya `alt` text pada canvas peta (peta canvas secara native
+  tidak accessible, jadi list ini adalah SUMBER UTAMA untuk screen reader, bukan
+  pelengkap kosmetik).
+- Graceful degradation: jika tile map gagal load (network error/timeout),
+  otomatis tampilkan dropdown teks bertingkat sebagai fallback TANPA memblokir
+  alur pengisian form — implementasikan error boundary/catch di komponen peta
+  yang switch ke mode fallback, tulis test yang mensimulasikan kegagalan load
+  tile dan verifikasi fallback muncul.
+
+## Testing wajib
+1. Backend: test `ST_Contains` resolve dengan titik di DALAM polygon seed data
+   Fase 1 -> hasil benar. Titik di LUAR semua polygon -> 404. Titik di area yang
+   HANYA punya boundary adm3 (bukan adm4) -> `resolutionLevel: 'adm3'`.
+2. Backend: benchmark p95 < 150ms untuk `/locations/resolve` (laporkan angka
+   aktual, bukan estimasi).
+3. Backend: test `/locations/:adm4/boundary` mengembalikan GeoJSON valid dan
+   ukuran payload < 50KB untuk data seed.
+4. Backend: test bahwa TIDAK ADA endpoint di modul `geospatial` yang menulis ke
+   tabel `analysis_results` atau menghitung risk score — modul ini read-only
+   terhadap hasil analysis (buktikan dengan review import: modul geospatial
+   tidak boleh mengimpor `decision-engine`).
+5. Frontend: test bahwa memilih lokasi via peta (Mode A) menghasilkan
+   `locationCode` yang SAMA persis dengan memilih lokasi yang sama via dropdown
+   teks (§84 spatial invariant: "Same adm4 Code as Manual Dropdown Selection ->
+   Identical Downstream Decision Chain") — test ini penting untuk membuktikan
+   dua jalur input tidak menghasilkan hasil berbeda.
+6. Frontend: test fallback ke dropdown teks saat tile gagal load.
+7. Frontend: test marker Mode B punya kombinasi warna+bentuk yang benar untuk
+   keempat risk_label, dan list-view alternatif teks ter-render untuk setiap marker.
+
+## Definition of Done
+- [ ] Semua 4 endpoint geospasial backend berfungsi dan lulus test.
+- [ ] p95 resolve < 150ms terbukti dengan angka benchmark aktual.
+- [ ] Payload boundary < 50KB terbukti.
+- [ ] Mode A (location picker) berfungsi: tap peta ATAU search ATAU dropdown
+      teks, ketiganya menghasilkan `locationCode` valid yang konsisten.
+- [ ] Mode B (tracking dashboard) berfungsi dengan data mock, marker warna+bentuk
+      benar, heatmap berlabel jelas, list-view teks lengkap ada.
+- [ ] Fallback graceful saat tile gagal load terbukti dengan test.
+- [ ] Modul geospatial terbukti tidak menghitung/menulis risk score (read-only
+      terhadap hasil decision engine).
+- [ ] Pemilihan tile source produksi final DITANDAI sebagai keputusan manusia
+      yang belum final di fase ini.
+- [ ] `npm run typecheck` bersih, `npm test` lulus semua.
+
+Laporkan: angka benchmark p95 aktual, ukuran payload boundary aktual, screenshot
+atau deskripsi hasil render Mode A & B, dan konfirmasi eksplisit invariant
+"peta = alat bantu, backend = otoritas skor" tidak dilanggar di mana pun dalam
+kode. Jangan lanjut ke Fase 7 tanpa instruksi eksplisit.
+```

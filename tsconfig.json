@@ -7,6 +7,8 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM"],
     "outDir": "dist",
     "sourceMap": true,
     "types": ["node", "vitest/globals"]

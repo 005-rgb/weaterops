@@ -51,6 +51,33 @@ Provider API dapat dikelola melalui `GET/POST /api/v1/weather/sources`,
 `PATCH /api/v1/weather/sources/:id`, dan `DELETE /api/v1/weather/sources/:id`.
 Delete bersifat soft-delete (`enabled=false`) sehingga histori tidak hilang.
 
+## Fase 6 — geospasial dan peta operasional
+
+Endpoint geospasial:
+
+```text
+GET /api/v1/locations?level=adm1|adm2|adm3|adm4&parentCode=...
+GET /api/v1/locations/resolve?lat=...&lng=...
+GET /api/v1/locations/:adm4/boundary
+GET /api/v1/locations/search?q=...&viewportLat=...&viewportLng=...
+GET /api/v1/geospatial/hazard-heatmap?bounds=west,south,east,north
+```
+
+`resolve` menggunakan `ST_Contains` dengan urutan koordinat PostGIS
+longitude-lalu-latitude dan fallback `adm4 → adm3 → adm2 → adm1`.
+`boundary` mengembalikan GeoJSON tersederhana dan menyimpan cache
+`geometry_simplified`; toleransi dapat diatur dengan
+`BOUNDARY_SIMPLIFY_TOLERANCE` (default `0.001` derajat).
+
+Frontend React + MapLibre tersedia di root preview dalam Mode A (location
+picker) dan Mode B (tracking dashboard). Tile OpenFreeMap yang dipakai saat
+development bukan keputusan provider produksi; provider produksi dan
+persyaratan atribusinya harus dikonfirmasi manusia sebelum go-live. Jika
+WebGL/tile gagal, dropdown hierarkis dan list analisis tetap tersedia.
+Heatmap diberi label sebagai agregasi hazard cuaca, bukan skor risiko proyek.
+Jalankan `npm run benchmark:geospatial` untuk benchmark p95 100 iterasi ketika
+database PostGIS dan seed sudah tersedia.
+
 ## Fase 4 — analisis dan report
 
 Endpoint analisis:

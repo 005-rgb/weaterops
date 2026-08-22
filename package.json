@@ -7,11 +7,13 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "tsx src/server.ts",
+    "dev": "npm run build:frontend && tsx src/server.ts",
+    "build:frontend": "vite build",
     "build": "tsc",
     "start": "node dist/server.js",
     "db:migrate": "node-pg-migrate -m src/infrastructure/database/migrations up",
     "seed:dev": "tsx scripts/seed-dev.ts",
+    "benchmark:geospatial": "tsx scripts/geospatial-benchmark.ts",
     "db:bootstrap": "npm run db:migrate && npm run seed:dev",
     "bmkg:contract": "tsx scripts/bmkg-contract-test.ts",
     "test": "vitest run",
@@ -21,11 +23,19 @@
     "format": "prettier --write ."
   },
   "dependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@types/supertest": "^7.2.1",
+    "@vitejs/plugin-react": "^6.1.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "i18next": "^26.4.0",
+    "maplibre-gl": "^6.5.0",
     "pg": "^8.23.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-map-gl": "^8.1.2",
+    "vite": "^8.2.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {

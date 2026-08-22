@@ -1,8 +1,13 @@
 import { createApp } from './app.js';
 import { env } from './app/config/env.js';
 import { getPostgisVersion } from './infrastructure/database/client.js';
+import express from 'express';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const app = createApp();
+const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist/frontend');
+app.use(express.static(frontendRoot));
 
 try {
   const version = await getPostgisVersion();
