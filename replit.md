@@ -129,3 +129,25 @@ Akses board memerlukan UUID asli melalui header dan membandingkan hash header
 dengan hash di path. Retensi board diperpanjang tujuh hari setiap aktivitas,
 selaras dengan analisis. `regional-trend` hanya membaca slot cuaca tersimpan
 dan tidak memanggil BMKG.
+
+## Fase 8 — anti-abuse
+
+`POST /api/v1/analyses` dilindungi berurutan oleh rate limit IP + fingerprint-lite,
+proof-of-work one-time, adaptive Turnstile, dan quota session 24 jam. IP hanya
+disimpan sebagai SHA-256 dengan `IP_HASH_SALT`; IP mentah tidak ditulis ke event
+atau log aplikasi. Challenge dapat diambil melalui:
+
+```text
+GET /api/v1/anti-abuse/challenge
+```
+
+Client mengirim `X-PoW-Challenge-Id`, `X-PoW-Nonce`, dan opsional
+`X-Captcha-Token`. Helper frontend menjalankan SHA-256 PoW di Web Worker.
+Turnstile diaktifkan saat `TURNSTILE_SECRET_KEY` dan `TURNSTILE_SITE_KEY` tersedia.
+Pengguna sah di bawah ambang tidak diminta CAPTCHA. Atur ambang melalui
+`RATE_LIMIT_ANALYSES_PER_MIN`, `RISK_SCORE_CAPTCHA_THRESHOLD`,
+`SESSION_QUOTA_PER_24H`, dan `POW_DIFFICULTY`.
+
+Event anti-abuse dibersihkan otomatis setiap 30 menit setelah berumur 30 hari.
+State rate limit/challenge saat ini in-memory; deployment multi-instance perlu
+store bersama seperti Redis sebelum scaling horizontal.

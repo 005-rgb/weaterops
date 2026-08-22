@@ -1,0 +1,166 @@
+# FASE 8 — Anti-Abuse Layer
+
+**Prasyarat:** Fase 4 (endpoint `POST /analyses` yang jadi target proteksi utama).
+**Boleh paralel dengan:** Fase 6-7 (tidak saling bergantung secara kode, tapi
+tetap disarankan dikerjakan setelah endpoint inti stabil).
+**Output fase ini:** Empat lapis pertahanan berlapis (§37a) tanpa mensyaratkan
+identitas/login sama sekali.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 8 dari 11 fase pembangunan WeatherOps. Kamu membangun `anti-abuse` —
+proteksi terhadap spam `POST /analyses` (target paling mahal: setiap cache-miss
+memicu fetch BMKG yang membebani rate limit bersama). Bangun EMPAT lapis SECARA
+BERURUTAN, uji tiap lapis SEBELUM lanjut ke lapis berikutnya — jangan bangun
+semuanya sekaligus lalu baru diuji, karena kegagalan satu lapis sulit didiagnosis
+jika keempatnya dibangun bersamaan.
+
+## LAPIS 1 — IP + fingerprint-lite rate limiting (dasar, selalu aktif)
+- Middleware `src/app/middleware/rate-limit.ts`, terapkan di route
+  `POST /api/v1/analyses` SPESIFIK (bukan global semua endpoint — endpoint baca
+  seperti GET report/board tidak seketat ini).
+- Rate limit berbasis IP (gunakan `req.ip`, HASH sebelum dipakai sebagai key
+  internal jika disimpan — lihat catatan privasi di bawah): default
+  10 request/menit per IP untuk `POST /analyses`, configurable via env
+  `RATE_LIMIT_ANALYSES_PER_MIN`.
+- Fingerprint-lite: kombinasikan IP hash + user-agent class (kategori kasar:
+  mobile/desktop/bot-like berdasarkan UA string, BUKAN parsing UA granular) +
+  ukuran viewport (dikirim dari frontend sebagai header custom
+  `X-Viewport: WIDTHxHEIGHT`, opsional). JANGAN gunakan canvas fingerprinting,
+  audio fingerprinting, atau teknik invasif lain — ini eksplisit dilarang §37a.2.
+- Simpan state rate limit di memory (mis. `Map` dengan TTL, atau library seperti
+  `express-rate-limit` dengan in-memory store) — untuk production nanti
+  pertimbangkan Redis, tapi TANDAI itu sebagai catatan scaling, bukan blocker
+  fase ini.
+- Response saat limit terlampaui: 429 dengan error code `RATE_BLOCKED`, DAN
+  tulis event `anti_abuse_events` (`event_type='RATE_BLOCKED'`, `ip_hash`,
+  `risk_score` awal sederhana mis. 100 untuk kasus rate block langsung).
+
+## LAPIS 2 — Proof-of-Work challenge (default, non-intrusive)
+- Endpoint baru: `GET /api/v1/anti-abuse/challenge` -> generate challenge
+  Hashcash-like: `{ challengeId: uuid, difficulty: number, seed: string }`.
+  Simpan challenge di memory/cache sementara (TTL pendek, mis. 2 menit) dengan
+  `challengeId` sebagai key.
+- Client (frontend) HARUS memanggil endpoint ini SEBELUM `POST /analyses`,
+  menghitung hash (mis. SHA-256 iteratif mencari nonce yang menghasilkan hash
+  dengan N leading zero sesuai `difficulty`) di Web Worker (JANGAN blokir main
+  thread UI), target waktu komputasi < 300ms pada perangkat rata-rata (§37a.1) —
+  kalibrasi `difficulty` default yang realistis, dokumentasikan cara ujinya.
+- Kirim hasil sebagai header `X-PoW-Challenge-Id` + `X-PoW-Nonce` pada
+  `POST /analyses`.
+- Middleware backend memverifikasi: challenge ada & belum expired & belum
+  dipakai (one-time use, hapus dari store setelah verifikasi sukses/gagal) &
+  hash(seed + nonce) memenuhi difficulty. Jika verifikasi gagal atau challenge
+  tidak disertakan -> lanjutkan permintaan TAPI tandai `risk_score` request ini
+  meningkat (JANGAN langsung block di lapis ini — proof-of-work yang gagal
+  adalah SINYAL untuk lapis 3, bukan blocker keras sendiri, sesuai
+  §37a.1 "kegagalan proof-of-work berulang" adalah salah satu INPUT risk_score,
+  bukan penolakan otomatis).
+- Tulis event `anti_abuse_events` untuk `CHALLENGE_ISSUED`, `CHALLENGE_PASSED`,
+  `CHALLENGE_FAILED`.
+
+## LAPIS 3 — Adaptive CAPTCHA (Turnstile/hCaptcha, hanya saat risk tinggi)
+- Hitung `risk_score` SESI (bukan per-request) dari kombinasi: kecepatan request
+  (request per menit dari IP/session ini), rasio `CHALLENGE_FAILED` vs
+  `CHALLENGE_PASSED` dalam window waktu tertentu (mis. 1 jam terakhir, query dari
+  `anti_abuse_events`), dan pola IP (mis. banyak session_key berbeda dari IP yang
+  sama dalam waktu singkat — indikasi bot rotating session).
+- Definisikan `RISK_SCORE_CAPTCHA_THRESHOLD` (configurable via env, default
+  masuk akal mis. 70/100) — jika `risk_score` sesi melewati ambang ini,
+  `POST /analyses` mengembalikan 403 `ANTI_ABUSE_CHALLENGE_REQUIRED` dengan
+  detail cara menyelesaikan CAPTCHA (site key Turnstile/hCaptcha dari env
+  `TURNSTILE_SITE_KEY`).
+- Client menampilkan widget Turnstile/hCaptcha (gunakan salah satu, sesuai
+  §8.9 — pilih Turnstile sebagai default karena privacy-preserving, hCaptcha
+  sebagai alternatif configurable), kirim ulang `POST /analyses` dengan token
+  CAPTCHA di header `X-Captcha-Token`.
+- Backend verifikasi token ke API Turnstile/hCaptcha (server-to-server call
+  dengan secret key dari env `TURNSTILE_SECRET_KEY`) — jika valid, izinkan
+  request lanjut DAN reset/turunkan `risk_score` sesi ini untuk sementara waktu.
+- PENTING (§37a.3 Failure UX): pesan yang ditampilkan ke user HARUS jelas dan
+  TIDAK menuduh — "Untuk melindungi layanan dari penyalahgunaan, mohon
+  selesaikan verifikasi singkat" (via translation catalog Fase 5, tambahkan
+  entri baru). User TIDAK BOLEH terjebak tanpa jalur verifikasi — pastikan ada
+  cara jelas menyelesaikan CAPTCHA dan lanjut, bukan dead-end.
+
+## LAPIS 4 — Session quota
+- Untuk request yang MEMBAWA `session_key_hash` valid (dari Fase 7), hitung
+  jumlah `analysis_requests` yang dibuat oleh `session_key_hash` ini dalam 24
+  jam terakhir.
+- Jika melebihi `SESSION_QUOTA_PER_24H` (default 20, configurable), WAJIBKAN
+  CAPTCHA (lapis 3) untuk request berikutnya dari session ini, TERLEPAS dari
+  `risk_score` lapis 3 — ini proteksi terpisah yang membedakan "supervisor sah
+  yang mengelola banyak proyek" (yang akan mengisi CAPTCHA sesekali dan lanjut)
+  dari bot murni (§37a.1 poin 4).
+
+## Privacy constraint (§37a.2) — VERIFIKASI INI DENGAN TEST, bukan hanya kode
+- `ip_hash`: HASH bergaram (salt dari env `IP_HASH_SALT`) SEBELUM disimpan di
+  `anti_abuse_events.ip_hash` — IP mentah TIDAK PERNAH ditulis ke tabel apa pun,
+  bahkan sementara di log level info (boleh di log level DEBUG untuk
+  troubleshooting lokal development SAJA, dengan guard `NODE_ENV !== 'production'`
+  eksplisit, dan TANDAI risiko ini di komentar).
+- Retensi `anti_abuse_events`: 30 hari (BERBEDA dari retention 7 hari default
+  tabel lain, sudah dicatat di Fase 1) — implementasikan job/cron pembersihan
+  (bisa berupa scheduled function sederhana yang jalan saat startup + interval,
+  tidak perlu infrastruktur cron eksternal untuk fase ini) yang menghapus baris
+  `anti_abuse_events` dengan `created_at` > 30 hari lalu.
+- Fingerprint-lite TERBATAS pada sinyal non-invasif (poin Lapis 1 di atas) —
+  buat test/review checklist eksplisit yang memverifikasi TIDAK ADA canvas API,
+  WebGL fingerprinting, atau audio context fingerprinting di kode frontend
+  manapun (grep untuk `getImageData`, `toDataURL` dari canvas, `AudioContext`
+  dipakai untuk fingerprinting — pastikan tidak ada).
+
+## Integrasi dengan `POST /analyses` (Fase 4) — urutan eksekusi middleware
+1. Rate limit (Lapis 1) -> block cepat jika sudah jelas abuse.
+2. Proof-of-work verification (Lapis 2) -> tidak block, hanya update risk_score.
+3. Risk score check -> jika melewati threshold, minta CAPTCHA (Lapis 3),
+   response 403 sebelum request diproses lebih lanjut.
+4. Session quota check (Lapis 4) -> jika terlampaui, paksa CAPTCHA juga.
+5. Jika semua lolos -> lanjut ke logic asli `POST /analyses` dari Fase 4 (TIDAK
+   DIUBAH logikanya, hanya ditambah middleware DI DEPANNYA).
+
+## Testing wajib
+1. Test Lapis 1: request melebihi rate limit dari IP yang sama -> 429
+   `RATE_BLOCKED`, event tercatat.
+2. Test Lapis 2: proof-of-work valid -> lolos. Proof-of-work invalid/tidak ada
+   -> TETAP lolos (tidak diblok) tapi risk_score meningkat (verifikasi lewat
+   test yang membuat beberapa kegagalan lalu cek efeknya di Lapis 3).
+3. Test Lapis 3: simulasikan risk_score tinggi (banyak challenge gagal
+   berturut-turut) -> `POST /analyses` mengembalikan 403
+   `ANTI_ABUSE_CHALLENGE_REQUIRED`. Dengan token CAPTCHA valid (mock verifikasi
+   API eksternal) -> request lanjut normal.
+4. Test Lapis 4: buat 21 analysis dalam session yang sama dalam simulasi 24 jam
+   (manipulasi `created_at` di test data) -> request ke-21 wajib CAPTCHA
+   meskipun risk_score dari Lapis 3 rendah.
+5. Test privasi: query langsung tabel `anti_abuse_events` setelah serangkaian
+   request test, pastikan TIDAK ADA nilai yang menyerupai IP mentah (format
+   IPv4/IPv6) tersimpan — hanya hash.
+6. Test bahwa traffic SAH (request wajar, di bawah semua threshold) TIDAK PERNAH
+   melihat CAPTCHA sama sekali — ini bukti eksplisit "sebagian besar pengguna
+   sah tidak pernah melihat CAPTCHA" (§37a.1 poin 3).
+7. Test retensi 30 hari: buat event dengan `created_at` > 30 hari lalu, jalankan
+   fungsi cleanup, pastikan terhapus; event < 30 hari tetap ada.
+
+## Definition of Done
+- [ ] Keempat lapis berfungsi berurutan sesuai alur integrasi di atas.
+- [ ] Traffic sah tidak pernah terkena CAPTCHA (test eksplisit membuktikan ini).
+- [ ] IP mentah TERBUKTI tidak pernah tersimpan di database (test query
+      langsung).
+- [ ] Proof-of-work komputasi client < 300ms pada simulasi perangkat rata-rata
+      (laporkan hasil benchmark).
+- [ ] Session quota membedakan supervisor sah (banyak analysis wajar) dari bot
+      tanpa memblokir permanen.
+- [ ] Retensi 30 hari untuk `anti_abuse_events` terbukti bekerja.
+- [ ] Tidak ada teknik fingerprinting invasif di frontend (dibuktikan dengan
+      pencarian sistematis, ditunjukkan hasilnya).
+- [ ] Pesan CAPTCHA ke user jelas dan melalui translation catalog (Fase 5),
+      tidak hardcoded.
+- [ ] `npm run typecheck` bersih, `npm test` lulus semua.
+
+Laporkan: hasil test tiap lapis satu per satu, bukti IP tidak pernah mentah di
+DB, dan angka benchmark proof-of-work. Jangan lanjut ke Fase 9 tanpa instruksi
+eksplisit.
+```

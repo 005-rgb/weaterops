@@ -34,6 +34,37 @@ async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
   return response.status === 204 ? (undefined as T) : response.json();
 }
 
+// PoW runs in a dedicated worker so challenge computation never blocks the UI.
+export async function solveProofOfWork(challenge: { challengeId: string; difficulty: number; seed: string }): Promise<string> {
+  const workerSource = `
+    self.onmessage = async ({ data }) => {
+      for (let nonce = 0; ; nonce += 1) {
+        const bytes = new TextEncoder().encode(data.seed + nonce);
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
+        const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        if (hex.startsWith('0'.repeat(data.difficulty))) { self.postMessage(String(nonce)); return; }
+      }
+    };
+  `;
+  const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })));
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      worker.onmessage = (event) => resolve(event.data as string);
+      worker.onerror = () => reject(new Error('Proof-of-work worker failed'));
+      worker.postMessage(challenge);
+    });
+  } finally { worker.terminate(); }
+}
+
+export async function analysisApi<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const challenge = await api<{ challengeId: string; difficulty: number; seed: string }>('/api/v1/anti-abuse/challenge');
+  const nonce = await solveProofOfWork(challenge);
+  const headers = new Headers(options.headers);
+  headers.set('X-PoW-Challenge-Id', challenge.challengeId);
+  headers.set('X-PoW-Nonce', nonce);
+  return api<T>(url, { ...options, headers });
+}
+
 function TextLocationPicker({ onSelect, lang = 'id' }: { onSelect: (location: Location) => void; lang?: Language }) {
   const levels = ['adm1', 'adm2', 'adm3', 'adm4']; const names = ['Provinsi', 'Kabupaten/Kota', 'Kecamatan', 'Desa/Kelurahan'];
   const [selected, setSelected] = useState<(string | undefined)[]>([]); const [items, setItems] = useState<Record<string, Location[]>>({});

@@ -1,6 +1,10 @@
 import { REASON_CODES, type ReasonCode } from '../decision-engine/reason-codes.js';
 
 export const CATALOG_ENTRIES: Record<string, { id: string; en: string }> = {
+  ANTI_ABUSE_CHALLENGE_REQUIRED: {
+    id: 'Untuk melindungi layanan dari penyalahgunaan, mohon selesaikan verifikasi singkat.',
+    en: 'To protect the service from misuse, please complete a short verification.',
+  },
   SESSION_BOARD_SUMMARY_HIGH_RISK: { id: '{highRisk} dari {total} proyek Anda berisiko tinggi minggu ini', en: '{highRisk} of your {total} projects are high risk this week' },
   HEAVY_RAIN_CRITICAL_SLOT: {
     id: 'Hujan lebat berada dalam waktu kerja.',
