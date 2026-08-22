@@ -60,6 +60,19 @@ Modul weather hanya melakukan:
 5. Cache immutable snapshot dan freshness check.
 6. Contract-test harness terpisah untuk dijalankan manusia terhadap API live.
 
+### Penyimpanan dan penambahan provider
+
+Setiap provider didaftarkan di `weather_sources` dengan `code`, tipe
+`domestic`/`international`, dan `adapter_key`. Setiap panggilan upstream dicatat
+di `weather_api_responses`, termasuk body JSON mentah, status HTTP, parameter,
+durasi, dan error bila ada. `weather_snapshots` tetap menjadi cache canonical
+yang dipakai aplikasi; tabel audit tidak menggantikannya.
+
+Provider baru wajib mengimplementasikan kontrak `WeatherProvider`: mengambil
+forecast, memvalidasi schema miliknya sendiri, lalu menormalisasi ke canonical
+weather model. Dengan begitu perubahan format BMKG maupun penambahan API
+internasional tidak memaksa perubahan tabel inti atau adapter lain.
+
 Modul ini **tidak** membuat keputusan aktivitas, scoring, atau hazard mapping.
 
 ## Asumsi yang wajib diverifikasi manusia

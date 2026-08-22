@@ -1,0 +1,87 @@
+Set up the imported project
+The user just imported this project from a GitHub repository. It could be anything — an app to run on Replit, a library, a fork to study, code to reuse — so the first thing to do is ask what they want; everything after depends on the answer.
+
+Reviewing project workflow
+
+Reviewing project workflow
+I’ll take a quick look at the imported project’s README and entry points, then I’ll ask what direction you want. I won’t change or verify anything until you choose.
+
+
+
+4 actions
+I found a TypeScript Node API project with a single src/server.ts entry point, tests, and an .env.example; I’m checking the README and package scripts now so the next question is specific.
+
+
+
+6 actions
+This is a WeatherOps TypeScript/Express backend scaffold. It expects Node 24, PostgreSQL 17+ with PostGIS, and a DATABASE_URL; the imported project only has SESSION_SECRET, so database setup is the main missing prerequisite. The existing Replit workflow runs npm run dev, but it is currently failing because the app’s environment/database setup has not been completed.
+
+
+
+Worked for 14 seconds
+
+Checkpoint made
+6 minutes ago
+
+Pasted-Prioritas-wajib-Prioritas-API-service-Fungsi-Status-1-B_1787369083051.txt
+
+Pasted--FASE-2-BMKG-Adapter-Cache-Freshness-Normalizer-Prasyar_1787369146969.txt
+carikan API dibawah ini dan simpan terlebih dahulu di doc, kemudian implemantasikan sesuai promt . kerjakan dengan presisi tinggi.
+
+Free
+5 minutes ago
+Inspecting user task
+
+Inspecting user task
+Saya akan membaca dua dokumen spesifikasi terlampir, memetakan endpoint/API yang diminta ke struktur WeatherOps yang sudah ada, lalu menyimpan hasil riset dan keputusan implementasinya ke dokumen proyek sebelum menulis kode. Setelah itu saya akan implementasikan, jalankan pemeriksaan langsung yang tersedia, dan memastikan workflow kembali hidup.
+
+
+
+8 actions
+Spesifikasi meminta dua hal berbeda: (1) dokumentasi sumber API dan asumsi yang belum terverifikasi, lalu (2) implementasi Fase 2 tanpa mengarang URL/format BMKG. Saya akan mengecek sumber publik resmi yang relevan, menyusun dokumen riset terlebih dahulu, lalu menyesuaikan implementasi yang sudah ada dengan kontrak tersebut.
+
+
+
+10 actions
+
+Searched the web for "Apa dokumentasi resmi API prakiraan cuaca BMKG dan format respons JSON terkini?"
+
+Searched the web for "Apa sumber resmi API batas administrasi Indonesia dan layanan spasial BMKG untuk curah hujan serta angin?"
+
+8 actions
+Dokumen riset sudah tersimpan. Dari implementasi saat ini saya menemukan beberapa celah presisi terhadap spesifikasi: timestamp/field kosong masih dipaksa menjadi string atau epoch, error upstream belum mempertahankan kode terstruktur di level service, dan perlu memastikan konfigurasi freshness serta persistence mengikuti schema database. Saya akan memperbaiki bagian-bagian itu tanpa mengubah scope ke decision engine atau integrasi API lain yang belum terverifikasi.
+
+
+
+12 actions
+Perubahan inti sudah diterapkan. Saya juga akan menambahkan migration lanjutan agar database yang sudah menjalankan migration lama tetap konsisten—bukan hanya mengubah file migration historis—lalu menjalankan typecheck, test, dan lint secara langsung.
+
+
+
+6 actions
+Pemeriksaan belum bisa berjalan karena dependency npm belum terpasang (tsc, vitest, dan eslint tidak ditemukan). Saya akan memasang dependency dari package-lock.json, lalu menjalankan ulang pemeriksaan dan memperbaiki error nyata yang muncul.
+
+
+
+9 actions
+Dua isu verifikasi sudah jelas dan lokal: type narrowing pada callback persistence, serta test mengasumsikan fixture kedua memiliki field yang memang sengaja berisi nilai unknown tetapi valid. Saya akan memperbaiki type narrowing dan menambahkan fixture test khusus untuk benar-benar menguji field yang hilang menjadi null.
+
+
+
+6 actions
+Semua pemeriksaan kode sekarang lulus: typecheck, 15 test, dan lint. Saya akan restart workflow API untuk memastikan proses runtime benar-benar naik setelah dependency dan perubahan kode diterapkan, lalu membaca log startup sebelum menyelesaikan task.
+
+
+
+2 actions
+Workflow sudah berjalan di port 3000. Log menunjukkan server sehat, dengan satu batas lingkungan yang tetap terlihat: fungsi postgis_version() tidak tersedia pada database aktif, jadi koneksi PostGIS belum tervalidasi; saya tidak akan mengarang atau mengganti database. Saya akan cek endpoint health secara langsung dan kemudian mengajukan hanya tindak lanjut yang memang masih di luar scope Fase 2.
+
+
+
+4 actions
+Endpoint health teruji dan merespons 503 degraded karena database aktif belum memiliki PostGIS; ini konsisten dengan log startup dan merupakan prasyarat lingkungan, bukan error silent dari adapter. Saya sudah memisahkan migration lanjutan agar database lama dapat diperbarui dengan aman. Saya akan mencatat tiga tindak lanjut non-blocking: verifikasi live BMKG 72 jam, aktivasi PostGIS, dan konfirmasi mapping kode wilayah.
+
+
+
+Tindak lanjut WeatherOps sudah diajukan
+Implementasi dan dokumentasi selesai. Hasil akhir: riset API resmi tersimpan di docs/weather-api-research.md, adapter/cache/normalizer diperketat sesuai spesifikasi, migration lanjutan ditambahkan, dan typecheck + 15 test + lint lulus. Workflow berjalan; health endpoint masih 503 degraded hanya karena PostGIS belum tersedia di database aktif, dan itu sudah diajukan sebagai tindak lanjut terpisah.

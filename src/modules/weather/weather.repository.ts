@@ -11,6 +11,23 @@ export interface WeatherSlot {
   weather_desc: string; hazard_score: number; raw_fields: unknown; created_at: Date; expires_at: Date;
 }
 
+export interface WeatherApiResponse {
+  id: string;
+  source_code: string;
+  location_code: string | null;
+  request_url: string | null;
+  request_params: unknown;
+  http_status: number | null;
+  response_body: unknown;
+  response_text: string | null;
+  success: boolean;
+  error_code: string | null;
+  error_message: string | null;
+  duration_ms: number | null;
+  fetched_at: Date;
+  expires_at: Date;
+}
+
 export const weatherSnapshotsRepository: Repository<WeatherSnapshot> = createRepository(
   'weather_snapshots',
   ['location_code', 'source', 'raw_response', 'normalized_data', 'source_updated_at', 'fetched_at'],
@@ -18,6 +35,13 @@ export const weatherSnapshotsRepository: Repository<WeatherSnapshot> = createRep
 export const weatherSlotsRepository: Repository<WeatherSlot> = createRepository(
   'weather_slots',
   ['weather_snapshot_id', 'location_code', 'local_datetime', 'weather_desc', 'hazard_score', 'raw_fields'],
+);
+export const weatherApiResponsesRepository: Repository<WeatherApiResponse> = createRepository(
+  'weather_api_responses',
+  [
+    'source_code', 'location_code', 'request_url', 'request_params', 'http_status',
+    'response_body', 'response_text', 'success', 'error_code', 'error_message', 'duration_ms',
+  ],
 );
 
 export interface WeatherSnapshotRepository {
@@ -27,6 +51,10 @@ export interface WeatherSnapshotRepository {
 
 export interface WeatherSlotRepository {
   create(data: Partial<WeatherSlot>): Promise<WeatherSlot>;
+}
+
+export interface WeatherApiResponseRepository {
+  create(data: Partial<WeatherApiResponse>): Promise<WeatherApiResponse>;
 }
 
 export const weatherSnapshotStore: WeatherSnapshotRepository = {
@@ -42,4 +70,8 @@ export const weatherSnapshotStore: WeatherSnapshotRepository = {
 
 export const weatherSlotStore: WeatherSlotRepository = {
   create: (data) => weatherSlotsRepository.create(data),
+};
+
+export const weatherApiResponseStore: WeatherApiResponseRepository = {
+  create: (data) => weatherApiResponsesRepository.create(data),
 };

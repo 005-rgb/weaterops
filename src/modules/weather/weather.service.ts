@@ -5,7 +5,9 @@ import { getSourceUpdatedAt, normalizeForecast } from './weather.normalizer.js';
 import {
   weatherSlotStore,
   weatherSnapshotStore,
+  weatherApiResponseStore,
   type WeatherSnapshot,
+  type WeatherApiResponseRepository,
   type WeatherSnapshotRepository,
   type WeatherSlotRepository,
 } from './weather.repository.js';
@@ -28,6 +30,8 @@ export interface WeatherServiceOptions {
   client: Pick<BmkgClient, 'fetchForecast'>;
   snapshots: WeatherSnapshotRepository;
   slots: WeatherSlotRepository;
+  apiResponses?: WeatherApiResponseRepository;
+  sourceCode?: string;
   freshnessMinutes?: number;
   now?: () => Date;
 }
@@ -69,9 +73,15 @@ export class WeatherService {
     const sourceUpdatedAt = getSourceUpdatedAt(raw);
     let snapshot: WeatherSnapshot;
     try {
+      await this.options.apiResponses?.create({
+        source_code: this.options.sourceCode ?? 'BMKG',
+        location_code: locationCode,
+        response_body: raw,
+        success: true,
+      });
       snapshot = await this.options.snapshots.create({
         location_code: locationCode,
-        source: 'BMKG',
+        source: this.options.sourceCode ?? 'BMKG',
         raw_response: raw,
         normalized_data: normalized,
         source_updated_at: sourceUpdatedAt,
@@ -109,5 +119,11 @@ export class WeatherService {
 }
 
 export function createWeatherService(client = new BmkgClient()) {
-  return new WeatherService({ client, snapshots: weatherSnapshotStore, slots: weatherSlotStore });
+  return new WeatherService({
+    client,
+    snapshots: weatherSnapshotStore,
+    slots: weatherSlotStore,
+    apiResponses: weatherApiResponseStore,
+    sourceCode: 'BMKG',
+  });
 }
