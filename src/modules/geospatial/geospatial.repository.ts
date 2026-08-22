@@ -1,5 +1,6 @@
 import type { QueryResultRow } from 'pg';
 import { pool } from '../../infrastructure/database/client.js';
+import { fetchIndonesiaLocations } from './indonesia-locations.js';
 
 export type LocationLevel = 'adm1' | 'adm2' | 'adm3' | 'adm4';
 
@@ -93,7 +94,17 @@ export async function listLocations(level: LocationLevel, parentCode?: string) {
      ORDER BY name LIMIT 1000`,
     [level, parentCode ?? null],
   );
-  return result.rows;
+  const databaseRows = result.rows;
+  const isDevelopmentPlaceholder = databaseRows.length === 0
+    || databaseRows.every((row) => row.code.startsWith('DUMMY-'));
+  if (isDevelopmentPlaceholder) {
+    try {
+      return await fetchIndonesiaLocations(level, parentCode);
+    } catch {
+      // Keep the database catalog available if the public catalog is temporarily unreachable.
+    }
+  }
+  return databaseRows;
 }
 
 export async function getHazardHeatmap(bounds: [number, number, number, number]) {

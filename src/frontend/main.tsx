@@ -30,7 +30,10 @@ async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set('X-Session-Key', sessionKey());
   const response = await fetch(url, { ...options, headers });
-  if (!response.ok) throw new Error((await response.json()).error?.message ?? 'Permintaan gagal');
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: { message?: string } };
+    throw new Error(body.error?.message ?? 'Permintaan gagal');
+  }
   return response.status === 204 ? (undefined as T) : response.json();
 }
 
@@ -66,12 +69,48 @@ export async function analysisApi<T>(url: string, options: RequestInit = {}): Pr
 }
 
 function TextLocationPicker({ onSelect, lang = 'id' }: { onSelect: (location: Location) => void; lang?: Language }) {
-  const levels = ['adm1', 'adm2', 'adm3', 'adm4']; const names = ['Provinsi', 'Kabupaten/Kota', 'Kecamatan', 'Desa/Kelurahan'];
-  const [selected, setSelected] = useState<(string | undefined)[]>([]); const [items, setItems] = useState<Record<string, Location[]>>({});
-  useEffect(() => { const index = selected.length; if (index >= levels.length) return; const parent = selected[index - 1]; const url = `/api/v1/locations?level=${levels[index]}${parent ? `&parentCode=${encodeURIComponent(parent)}` : ''}`; void api<Location[]>(url).then((rows) => setItems((old) => ({ ...old, [levels[index]]: rows }))).catch(() => setItems((old) => ({ ...old, [levels[index]]: [] }))); }, [selected]);
-  const choose = (index: number, value: string) => { const item = items[levels[index]]?.find((candidate) => candidate.code === value); if (!item) return; setSelected((old) => [...old.slice(0, index), value]); onSelect(item); };
+  const levels = ['adm1', 'adm2', 'adm3', 'adm4'] as const;
+  const names = ['Provinsi', 'Kabupaten/Kota', 'Kecamatan', 'Desa/Kelurahan'];
+  const [selected, setSelected] = useState<string[]>([]);
+  const [items, setItems] = useState<Record<string, Location[]>>({});
+  const [loading, setLoading] = useState<string | null>('adm1');
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    const index = selected.length;
+    if (index >= levels.length) return;
+    const level = levels[index];
+    const parent = selected[index - 1];
+    const controller = new AbortController();
+    setLoading(level);
+    setError(false);
+    const url = `/api/v1/locations?level=${level}${parent ? `&parentCode=${encodeURIComponent(parent)}` : ''}`;
+    void api<Location[]>(url, { signal: controller.signal })
+      .then((rows) => setItems((old) => ({ ...old, [level]: rows })))
+      .catch((cause: unknown) => { if (cause instanceof DOMException && cause.name === 'AbortError') return; setError(true); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(null); });
+    return () => controller.abort();
+  }, [selected]);
+  const choose = (index: number, value: string) => {
+    if (!value) {
+      setSelected((old) => old.slice(0, index));
+      return;
+    }
+    const level = levels[index];
+    const item = items[level]?.find((candidate) => candidate.code === value);
+    if (!item) return;
+    setSelected((old) => [...old.slice(0, index), value]);
+    if (index === levels.length - 1) onSelect(item);
+  };
   const localizedNames = lang === 'id' ? names : ['Province', 'Regency/City', 'District', 'Village'];
-  return <div className="dropdowns" aria-label={lang === 'id' ? 'Pemilih lokasi tekstual' : 'Text location picker'}>{levels.map((level, index) => <label key={level}>{localizedNames[index]}<select value={selected[index] ?? ''} disabled={index > selected.length} onChange={(event) => choose(index, event.target.value)}><option value="">{lang === 'id' ? 'Pilih…' : 'Choose…'}</option>{(items[level] ?? []).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>)}</div>;
+  return <div className="dropdowns" aria-label={lang === 'id' ? 'Pemilih lokasi administratif' : 'Administrative location picker'}>
+    {levels.map((level, index) => <label key={level}>{localizedNames[index]}
+      <select value={selected[index] ?? ''} disabled={index > selected.length || loading === level} onChange={(event) => choose(index, event.target.value)}>
+        <option value="">{loading === level ? (lang === 'id' ? 'Memuat…' : 'Loading…') : (lang === 'id' ? 'Pilih…' : 'Choose…')}</option>
+        {(items[level] ?? []).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}
+      </select>
+    </label>)}
+    {error && <small className="dropdown-error">{lang === 'id' ? 'Data lokasi gagal dimuat. Coba lagi.' : 'Location data failed to load. Try again.'}</small>}
+  </div>;
 }
 
 function supportsWebgl2() { const canvas = document.createElement('canvas'); return Boolean(canvas.getContext('webgl2')); }
@@ -82,7 +121,7 @@ export function LocationPickerMap({ onSelect, lang = 'id' }: { onSelect: (locati
   const click = async (event: MapLayerMouseEvent) => { try { const result = await api<Location>(`/api/v1/locations/resolve?lat=${event.lngLat.lat}&lng=${event.lngLat.lng}`); await select(result); } catch { setBoundary(undefined); } };
   useEffect(() => { if (query.trim().length < 2) { setResults([]); return; } const timer = window.setTimeout(() => void api<Location[]>(`/api/v1/locations/search?q=${encodeURIComponent(query)}&viewportLat=${view.latitude}&viewportLng=${view.longitude}`).then(setResults).catch(() => setResults([])), 250); return () => window.clearTimeout(timer); }, [query, view]);
   const copy = lang === 'id' ? {title:'Pilih lokasi operasional', search:'Cari desa, kecamatan…', aria:'Cari lokasi', unavailable:'Peta tidak tersedia. Gunakan pemilihan teks yang setara.', map:'Peta', or:'atau', dropdown:'Dropdown teks', precision:'Presisi', village:'Desa/Kelurahan', district:'Kecamatan'} : {title:'Choose an operational location', search:'Search village, district…', aria:'Search location', unavailable:'Map unavailable. Use the equivalent text picker.', map:'Map', or:'or', dropdown:'Text picker', precision:'Precision', village:'Village', district:'District'};
-  return <section className="picker"><div className="map-toolbar"><strong>{copy.title}</strong><div className="search"><input aria-label={copy.aria} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={copy.search} />{results.length > 0 && <ul>{results.map((result) => <li key={result.code}><button onClick={() => { setView({ longitude: 117, latitude: -2, zoom: 7 }); void select(result); setResults([]); }}>{result.name}<small>{result.fullName}</small></button></li>)}</ul>}</div></div>{mapFailed ? <div className="map-fallback"><p>{copy.unavailable}</p><TextLocationPicker onSelect={select} lang={lang} /></div> : <Map {...view} onMove={(e: ViewStateChangeEvent) => setView(e.viewState)} onClick={click} onError={() => setMapFailed(true)} mapStyle={mapStyle} style={{ height: 390 }}><NavigationControl position="bottom-right" />{boundary && <Source id="selected-boundary" type="geojson" data={boundary as any}><Layer id="selected-boundary-fill" type="fill" paint={{ 'fill-color': '#22c55e', 'fill-opacity': 0.22 }} /><Layer id="selected-boundary-line" type="line" paint={{ 'line-color': '#16a34a', 'line-width': 3 }} /></Source>}</Map>}<div className="picker-footer"><button className="tab active" onClick={() => setMapFailed(false)}>{copy.map}</button><span aria-hidden="true">{copy.or}</span><details><summary className="tab">{copy.dropdown}</summary><TextLocationPicker onSelect={select} lang={lang} /></details>{selected && <span className="precision">{copy.precision}: {selected.level === 'adm4' ? copy.village : copy.district} ({selected.level})</span>}</div></section>;
+  return <section className="picker"><div className="map-toolbar"><strong>{copy.title}</strong><div className="search"><input aria-label={copy.aria} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={copy.search} />{results.length > 0 && <ul>{results.map((result) => <li key={result.code}><button onClick={() => { setView({ longitude: 117, latitude: -2, zoom: 7 }); void select(result); setResults([]); }}>{result.name}<small>{result.fullName}</small></button></li>)}</ul>}</div></div>{mapFailed ? <div className="map-fallback"><p>{copy.unavailable}</p><TextLocationPicker onSelect={select} lang={lang} /></div> : <Map {...view} onMove={(e: ViewStateChangeEvent) => setView(e.viewState)} onClick={click} onError={() => setMapFailed(true)} mapStyle={mapStyle} style={{ height: 390 }}><NavigationControl position="bottom-right" />{boundary && <Source id="selected-boundary" type="geojson" data={boundary as any}><Layer id="selected-boundary-fill" type="fill" paint={{ 'fill-color': '#22c55e', 'fill-opacity': 0.22 }} /><Layer id="selected-boundary-line" type="line" paint={{ 'line-color': '#16a34a', 'line-width': 3 }} /></Source>}</Map>}<div className="picker-footer"><button className="tab active" onClick={() => setMapFailed(false)}>{copy.map}</button><span aria-hidden="true">{copy.or}</span><details open><summary className="tab">{copy.dropdown}</summary><TextLocationPicker onSelect={select} lang={lang} /></details>{selected && <span className="precision">{copy.precision}: {selected.level === 'adm4' ? copy.village : copy.district} ({selected.level})</span>}</div></section>;
 }
 
 export function TrackingMap({ analyses }: { analyses: Analysis[] }) {
