@@ -1,4 +1,5 @@
 import { BmkgClient } from '../../infrastructure/bmkg/bmkg-client.js';
+import type { BmkgErrorCode } from '../../infrastructure/bmkg/bmkg-client.js';
 import { env } from '../../app/config/env.js';
 import { getSourceUpdatedAt, normalizeForecast } from './weather.normalizer.js';
 import {
@@ -13,7 +14,8 @@ import type { CanonicalWeatherSlot } from './weather.types.js';
 export type WeatherServiceErrorCode =
   | 'WEATHER_NOT_CONFIGURED'
   | 'WEATHER_CACHE_ERROR'
-  | 'WEATHER_UPSTREAM_ERROR';
+  | 'WEATHER_UPSTREAM_ERROR'
+  | BmkgErrorCode;
 
 export class WeatherServiceError extends Error {
   constructor(public readonly code: WeatherServiceErrorCode, message: string, public readonly cause?: unknown) {
@@ -55,9 +57,13 @@ export class WeatherService {
     try {
       raw = await this.options.client.fetchForecast(locationCode);
     } catch (error) {
-      const code = error && typeof error === 'object' && 'code' in error
-        ? 'WEATHER_UPSTREAM_ERROR' : 'WEATHER_UPSTREAM_ERROR';
-      throw new WeatherServiceError(code, 'Unable to fetch weather from BMKG', error);
+      const upstreamCode = error && typeof error === 'object' && 'code' in error
+        && typeof error.code === 'string' ? error.code as BmkgErrorCode : null;
+      throw new WeatherServiceError(
+        upstreamCode ?? 'WEATHER_UPSTREAM_ERROR',
+        'Unable to fetch weather from BMKG',
+        error,
+      );
     }
     const normalized = normalizeForecast(raw, locationCode);
     const sourceUpdatedAt = getSourceUpdatedAt(raw);
@@ -70,15 +76,18 @@ export class WeatherService {
         normalized_data: normalized,
         source_updated_at: sourceUpdatedAt,
       });
-      await Promise.all(normalized.map((slot) => this.options.slots.create({
-        weather_snapshot_id: snapshot.id,
-        location_code: slot.locationCode,
-        local_datetime: slot.localDatetime ? new Date(slot.localDatetime) : new Date(0),
-        weather_desc: slot.weatherDesc,
-        // This column predates the decision engine; 0 is neutral storage, not a decision.
-        hazard_score: 0,
-        raw_fields: slot,
-      })));
+      await Promise.all(normalized.flatMap((slot) => {
+        if (slot.localDatetime === null) return [];
+        return [this.options.slots.create({
+          weather_snapshot_id: snapshot.id,
+          location_code: slot.locationCode,
+          local_datetime: new Date(slot.localDatetime),
+          weather_desc: slot.weatherDesc ?? '',
+          // This column predates the decision engine; 0 is neutral storage, not a decision.
+          hazard_score: 0,
+          raw_fields: slot,
+        })];
+      }));
     } catch (error) {
       throw new WeatherServiceError('WEATHER_CACHE_ERROR', 'Unable to persist weather snapshot', error);
     }

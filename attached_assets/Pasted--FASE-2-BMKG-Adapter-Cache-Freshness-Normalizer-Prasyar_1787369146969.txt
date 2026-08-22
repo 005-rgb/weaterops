@@ -1,0 +1,182 @@
+# FASE 2 — BMKG Adapter, Cache, Freshness, Normalizer
+
+**Prasyarat:** Fase 1 selesai (tabel `weather_snapshots`, `weather_slots`, `locations` ada).
+**Output fase ini:** Modul `weather` lengkap — client BMKG, cache, aturan freshness,
+normalizer ke canonical weather model, DAN contract test suite (§13a.2).
+
+**PERINGATAN KRITIS:** Bagian verifikasi kontrak BMKG nyata (§13a.1, 6 langkah,
+termasuk 72 jam observasi live) TIDAK BISA diselesaikan oleh agent coding sendirian
+di satu sesi — itu butuh waktu tunggu nyata dan keputusan manusia (product owner)
+untuk menyetujui bukti. Prompt ini memisahkan dua hal:
+(A) kode yang bisa dibangun sekarang dengan asumsi terdokumentasi eksplisit, dan
+(B) checklist verifikasi yang harus dijalankan manusia/QA secara terpisah SEBELUM
+fase ini dianggap production-complete. JANGAN biarkan agent menandai (B) selesai
+hanya karena (A) sudah jalan.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 2 dari 11 fase pembangunan WeatherOps. Kamu membangun modul `weather` —
+integrasi BMKG, cache, freshness check, dan normalizer. JANGAN implementasikan
+decision engine atau scoring (itu Fase 3) — modul ini HANYA menghasilkan data
+cuaca ternormalisasi, bukan keputusan.
+
+## BAGIAN A — Yang kamu bangun sekarang
+
+### A.1 BMKG Client (`src/infrastructure/bmkg/bmkg-client.ts`)
+- Base URL BMKG diambil dari env `BMKG_BASE_URL` — JANGAN hardcode URL apa pun di
+  kode, karena URL produksi resmi BELUM terverifikasi (lihat Bagian B).
+- Implementasikan HTTP client dengan:
+  - timeout eksplisit (default 5000ms, configurable via env `BMKG_TIMEOUT_MS`).
+  - retry dengan exponential backoff, maksimum 2 retry, HANYA untuk error
+    5xx/timeout/network error (JANGAN retry pada 4xx).
+  - rate limiting sisi klien sesuai `BMKG_RATE_LIMIT_PER_MIN` dari env (default
+    aman 60/menit sampai angka resmi dikonfirmasi — TANDAI dengan komentar
+    `// TODO(§13a.1.1): ganti dengan rate limit resmi BMKG setelah verifikasi`).
+- Method: `fetchForecast(locationCode: string): Promise<RawBmkgResponse>`.
+- SEMUA response mentah (sukses maupun gagal) disimpan sebagai snapshot untuk
+  forensik (§13a.2) — buat mekanisme logging raw response terpisah dari flow
+  normal, jangan campur dengan business logic.
+
+### A.2 Schema validation (§13a.2)
+- Definisikan schema Zod untuk response BMKG BERDASARKAN struktur yang PALING
+  UMUM didokumentasikan publik BMKG (format per-jam per-wilayah dengan array
+  `cuaca`, field seperti `datetime`, `t` (suhu), `hu` (kelembapan), `weather_desc`,
+  `weather_desc_en`, `wd` (arah angin), `ws` (kecepatan angin), `tcc` (tutupan
+  awan)) — TANDAI EKSPLISIT di komentar kode bahwa struktur ini adalah ASUMSI
+  berbasis dokumentasi publik dan WAJIB diverifikasi ulang terhadap API live
+  sebelum go-live (§13a.1 poin 3-4).
+- Validasi SETIAP response masuk terhadap schema ini. Jika validasi gagal:
+  - JANGAN lempar exception yang mematikan request user.
+  - Simpan raw response yang gagal validasi ke tabel terpisah/log untuk audit.
+  - Trigger alert placeholder (fungsi `alertSchemaValidationFailure()` — isi
+    implementasi aktual nanti di Fase 9 saat observability ada; untuk sekarang
+    cukup log terstruktur level ERROR).
+  - Kembalikan error terstruktur `BMKG_SCHEMA_VALIDATION_FAILED` ke pemanggil.
+- Hitung dan expose metric sederhana (in-memory counter untuk sekarang, akan
+  diperluas Fase 9): persentase response yang gagal validasi dalam window 15 menit.
+  Jika > 1% (default, configurable via env `BMKG_SCHEMA_FAIL_THRESHOLD_PCT`),
+  set flag internal `bmkgHealthDegraded = true` yang bisa dibaca modul lain.
+
+### A.3 Normalizer (`src/modules/weather/weather.normalizer.ts`) — Canonical Weather Model (§16)
+- Transform RawBmkgResponse -> struktur ternormalisasi kanonik:
+  ```ts
+  interface CanonicalWeatherSlot {
+    locationCode: string;
+    localDatetime: string;   // ISO 8601 dengan timezone eksplisit — ASUMSIKAN
+                              // WIB/WITA/WIT sesuai wilayah, TANDAI bahwa format
+                              // asli BMKG untuk field ini BELUM diverifikasi (§13a.1.3)
+    weatherDesc: string;     // nilai mentah dari BMKG, JANGAN diterjemahkan di sini
+    weatherDescNormalized: WeatherDescCode | 'UNKNOWN';  // lihat A.4
+    temperatureC: number | null;
+    humidityPct: number | null;
+    windSpeedMs: number | null;
+    windDirection: string | null;
+    cloudCoverPct: number | null;
+  }
+  ```
+- SETIAP field yang nilainya tidak ada/tidak bisa diparse HARUS jadi `null`,
+  BUKAN 0 atau default lain yang menyamarkan ketiadaan data (§47, UNKNOWN Policy —
+  meski detail §47 dikerjakan di fase lain, prinsip ini berlaku dari sekarang).
+
+### A.4 Hazard mapping table skeleton (§17 disebut, tapi isi lengkap tugas Fase 3)
+- Buat enum/union type `WeatherDescCode` di `src/modules/weather/weather.types.ts`
+  berisi HANYA nilai-nilai yang kamu temukan di dokumentasi publik BMKG yang bisa
+  diverifikasi (mis. cerah, cerah berawan, berawan, berawan tebal, hujan ringan,
+  hujan sedang, hujan lebat, hujan petir, kabut, dst — gunakan nilai yang benar-benar
+  terdokumentasi, JANGAN mengarang nilai yang kamu tidak yakin ada).
+- Buat fungsi `normalizeWeatherDesc(raw: string): WeatherDescCode | 'UNKNOWN'` —
+  nilai yang TIDAK cocok dengan enum yang sudah dikonfirmasi HARUS mengembalikan
+  `'UNKNOWN'`, bukan ditebak/dipetakan paksa ke kategori terdekat (§13a.1 poin 4:
+  "nilai yang belum terverifikasi harus tetap masuk kategori UNKNOWN sampai
+  dikonfirmasi, bukan diasumsikan").
+
+### A.5 Cache (§14)
+- Cache key: `weather:{locationCode}` (atau granularitas lain jika perlu per
+  rentang tanggal — dokumentasikan keputusanmu).
+- Simpan hasil fetch BMKG sebagai baris baru `weather_snapshots` (bukan overwrite —
+  ini log immutable sesuai Fase 1), tapi untuk keputusan "apakah perlu fetch baru",
+  query snapshot TERBARU per location dan bandingkan dengan aturan freshness (A.6).
+- Implementasikan cache-hit vs cache-miss path secara eksplisit dan dapat diuji
+  terpisah (agar Fase 4 bisa memverifikasi target latency §58a.1 cache-hit vs
+  cache-miss secara terpisah nanti).
+
+### A.6 Freshness rule (§15)
+- Definisikan `WEATHER_FRESHNESS_THRESHOLD_MINUTES` (default aman, mis. 60 menit,
+  di-env-kan sebagai `WEATHER_FRESHNESS_MINUTES` — TANDAI bahwa angka ini WAJIB
+  dikalibrasi ulang setelah `source_updated_at` aktual terverifikasi, §13a.1 poin 5).
+- Snapshot dianggap "fresh" jika `now() - fetched_at < threshold` DAN (jika
+  `source_updated_at` tersedia dari BMKG) `source_updated_at` juga tidak terlalu
+  lama. Jika tidak fresh -> trigger fetch baru.
+
+### A.7 Service layer (`src/modules/weather/weather.service.ts`)
+- `getForecastForLocation(locationCode: string): Promise<CanonicalWeatherSlot[]>`
+  — orkestrasi: cek cache/freshness -> jika perlu, panggil BMKG client -> validasi
+  schema -> normalize -> simpan ke `weather_snapshots` + `weather_slots` -> return
+  data ternormalisasi.
+- Semua error path (BMKG timeout, schema invalid, rate limit habis) harus
+  menghasilkan error terstruktur yang BISA dibedakan oleh pemanggil (Fase 4 nanti
+  butuh membedakan ini untuk §46 Failure UX), bukan generic `Error`.
+
+## BAGIAN B — Checklist verifikasi manual (BUKAN tugas agent, JANGAN ditandai selesai oleh agent)
+
+Setelah kode Bagian A jalan di staging, MANUSIA (bukan agent) wajib:
+1. Konfirmasi base URL produksi BMKG resmi + rate limit terdokumentasi + syarat
+   penggunaan — update `BMKG_BASE_URL` dan `BMKG_RATE_LIMIT_PER_MIN` di env
+   produksi dengan nilai TERVERIFIKASI, bukan default aman di kode.
+2. Konfirmasi struktur kode wilayah BMKG vs kode Kemendagri — jika berbeda,
+   buat migration tabel mapping `bmkg_adm4_code <-> kemendagri_adm4_code` (ini
+   BOLEH didelegasikan ke agent SETELAH manusia mengonfirmasi perbedaannya ada
+   dan seperti apa strukturnya — jangan minta agent menebak mapping ini).
+3. Konfirmasi format `local_datetime`/`analysis_date` aktual — update normalizer
+   A.3 jika berbeda dari asumsi.
+4. Konfirmasi daftar `weather_desc` yang BENAR-BENAR dikembalikan API (uji
+   langsung, bukan hanya baca dokumentasi) — update enum A.4.
+5. Konfirmasi frekuensi update `source_updated_at` aktual — kalibrasi ulang
+   `WEATHER_FRESHNESS_MINUTES`.
+6. Jalankan contract test suite (lihat testing di bawah) terhadap API ASLI
+   minimum 72 jam berturut-turut di staging, catat error rate/latency/downtime,
+   lampirkan laporan sebagai bukti.
+
+Exit criteria fase ini TIDAK terpenuhi sampai keenam poin Bagian B selesai dengan
+bukti terlampir dan disetujui product owner (§13a.3) — agent hanya menyiapkan KODE
+dan test HARNESS untuk memudahkan verifikasi ini, bukan melakukan verifikasinya sendiri.
+
+## Testing wajib (bisa dikerjakan agent sekarang, terpisah dari Bagian B)
+1. Unit test normalizer dengan FIXTURE response BMKG (buat file fixture JSON
+   berdasarkan contoh dari dokumentasi publik, TANDAI di nama file
+   `bmkg-response.assumed-format.json` supaya jelas ini asumsi, bukan hasil
+   verifikasi nyata).
+2. Test bahwa response yang tidak valid terhadap schema menghasilkan
+   `BMKG_SCHEMA_VALIDATION_FAILED`, bukan crash.
+3. Test bahwa `weatherDesc` yang tidak dikenal menghasilkan `'UNKNOWN'`, bukan
+   nilai tebakan.
+4. Test cache-hit path TIDAK memanggil BMKG client (mock/spy, assert not called).
+5. Test cache-miss/expired path MEMANGGIL BMKG client.
+6. Test retry: simulasikan 2x error 503 lalu sukses -> harus retry dan berhasil.
+   Simulasikan error 400 -> harus TIDAK retry.
+7. Siapkan (tapi jangan jalankan otomatis di CI biasa) contract test suite sebagai
+   script terpisah `scripts/bmkg-contract-test.ts` yang BISA dijalankan manusia
+   terhadap API live untuk keperluan Bagian B poin 6 — beri instruksi cara
+   menjalankannya di README module weather.
+
+## Definition of Done (Bagian A saja — Bagian B punya exit criteria sendiri di atas)
+- [ ] BMKG client dengan timeout, retry, rate limit sisi-klien berfungsi (test lulus).
+- [ ] Schema validation + fallback UNKNOWN berfungsi, tidak pernah crash pada
+      response tak terduga.
+- [ ] Normalizer menghasilkan CanonicalWeatherSlot sesuai spesifikasi, field
+      kosong -> null, bukan default menyesatkan.
+- [ ] Cache + freshness rule teruji cache-hit vs cache-miss terpisah.
+- [ ] Semua konstanta yang masih berupa asumsi (rate limit, freshness threshold,
+      format datetime, daftar weather_desc) DITANDAI eksplisit dengan komentar
+      `// ASUMSI — verifikasi §13a.1` di kode, bukan disamarkan sebagai final.
+- [ ] Contract test script tersedia dan didokumentasikan cara pakainya untuk
+      keperluan verifikasi manual 72 jam.
+
+Laporkan: hasil semua test, daftar SEMUA asumsi yang masih perlu diverifikasi
+manusia (kutip lokasi kode persisnya), dan konfirmasi bahwa tidak ada nilai
+asumsi yang "diam-diam" dianggap final. Jangan lanjut ke Fase 3 tanpa instruksi
+eksplisit.
+```

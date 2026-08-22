@@ -29,6 +29,15 @@ describe('weather normalizer', () => {
     });
   });
 
+  it('uses null when source fields are absent', () => {
+    const parsed = bmkgResponseSchema.parse({ data: [{ cuaca: [{ datetime: null, weather_desc: null }] }] });
+    expect(normalizeForecast(parsed, 'DUMMY-KEL-1')[0]).toMatchObject({
+      localDatetime: null,
+      weatherDesc: null,
+      weatherDescNormalized: 'UNKNOWN',
+    });
+  });
+
   it('does not guess unknown descriptions', () => {
     expect(normalizeWeatherDesc('Nilai Baru BMKG')).toBe('UNKNOWN');
   });

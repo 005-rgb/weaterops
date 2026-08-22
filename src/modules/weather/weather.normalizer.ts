@@ -29,10 +29,10 @@ function flatten(groups: RawBmkgResponse['data'][number]['cuaca']): RawSlot[] {
 
 export function normalizeForecast(response: RawBmkgResponse, locationCode: string): CanonicalWeatherSlot[] {
   return response.data.flatMap((region) => flatten(region.cuaca).map((slot) => {
-    const weatherDesc = stringOrNull(slot.weather_desc) ?? '';
+    const weatherDesc = stringOrNull(slot.weather_desc);
     return {
       locationCode,
-      localDatetime: datetimeOrNull(slot.datetime) ?? '',
+      localDatetime: datetimeOrNull(slot.datetime),
       weatherDesc,
       weatherDescNormalized: weatherDesc ? normalizeWeatherDesc(weatherDesc) : 'UNKNOWN',
       temperatureC: numberOrNull(slot.t),

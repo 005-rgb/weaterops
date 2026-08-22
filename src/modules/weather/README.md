@@ -4,6 +4,11 @@ This module fetches BMKG forecasts, validates the assumed public response shape,
 normalizes weather slots, and stores immutable snapshots. It does not make
 activity decisions or calculate hazard scores.
 
+Missing upstream values remain `null` in the canonical model. Snapshot
+forensics are always persisted; slots without a parseable datetime remain in
+the normalized response but are not inserted into `weather_slots`, because
+they cannot be indexed as forecast times.
+
 ## Configuration
 
 `BMKG_BASE_URL` is intentionally required at runtime for upstream requests and

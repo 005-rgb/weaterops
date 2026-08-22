@@ -17,8 +17,8 @@ export type WeatherDescCode =
 export interface CanonicalWeatherSlot {
   locationCode: string;
   // ASUMSI — verifikasi §13a.1.3: BMKG datetime without an offset is treated as WIB.
-  localDatetime: string;
-  weatherDesc: string;
+  localDatetime: string | null;
+  weatherDesc: string | null;
   weatherDescNormalized: WeatherDescCode | 'UNKNOWN';
   temperatureC: number | null;
   humidityPct: number | null;
