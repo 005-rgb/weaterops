@@ -1,0 +1,158 @@
+# FASE 0 — Scaffold & Konfigurasi Proyek
+
+**Prasyarat:** Tidak ada (titik awal).
+**Output fase ini:** Proyek Node.js 24 yang bisa dijalankan, terhubung ke
+PostgreSQL 17 + PostGIS 3.4, dengan struktur folder final dan health check dasar.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Kamu akan membangun backend produk bernama WeatherOps — mesin keputusan operasional
+berbasis cuaca untuk pekerjaan konstruksi luar ruangan (Indonesia, sumber data BMKG).
+Ini adalah FASE 0 dari 11 fase pembangunan. Tugasmu HANYA scaffold dan konfigurasi —
+JANGAN implementasikan logika bisnis apa pun (tidak ada decision engine, tidak ada
+integrasi BMKG, tidak ada endpoint fungsional selain health check). Fase-fase
+berikutnya akan mengisi struktur yang kamu bangun sekarang.
+
+## Stack wajib
+- Runtime: Node.js 24.x (cek `node -v`, jika environment Replit belum 24.x,
+  konfigurasikan lewat .replit / nix agar versi ini yang dipakai — jangan diam-diam
+  downgrade ke versi yang tersedia default).
+- Bahasa: TypeScript (strict mode: true di tsconfig.json).
+- Database: PostgreSQL 17+ dengan ekstensi PostGIS 3.4+.
+- Package manager: npm.
+- Web framework: Express (versi terbaru stabil) — pilihan ini final, jangan ganti ke
+  Fastify/Koa/dll meskipun menurutmu lebih baik.
+
+## Struktur folder WAJIB (buat persis ini, termasuk folder kosong dengan .gitkeep bila belum ada isinya)
+
+src/
+  app/
+    config/
+    middleware/
+    routes/
+  modules/
+    locations/
+    activities/
+    weather/
+    analysis/
+    decision-engine/
+    reports/
+    system/
+    geospatial/
+    session-board/
+    i18n/
+    anti-abuse/
+  infrastructure/
+    database/
+    bmkg/
+    cache/
+    pdf/
+    logging/
+    tracing/
+  shared/
+    errors/
+    validation/
+    types/
+    utils/
+
+Setiap folder di dalam `modules/` nantinya berisi pola konsisten:
+  <module>/
+    <module>.controller.ts
+    <module>.service.ts
+    <module>.repository.ts   (jika module tsb butuh akses DB langsung)
+    <module>.types.ts
+    <module>.routes.ts
+    __tests__/
+
+Buat file `src/modules/<nama>/README.md` di SETIAP folder module (locations,
+activities, weather, analysis, decision-engine, reports, system, geospatial,
+session-board, i18n, anti-abuse) berisi HANYA satu baris: nama fase PRD yang akan
+mengisi module tsb, misalnya:
+  "Diisi pada Fase 6 — Geospasial (§7a, §42a). Jangan implementasikan di fase lain."
+Ini supaya siapa pun yang membuka repo tahu module ini sengaja kosong, bukan lupa
+dikerjakan.
+
+## Konfigurasi database
+1. Setup koneksi PostgreSQL via environment variable `DATABASE_URL`.
+2. Buat `src/infrastructure/database/client.ts` — koneksi pool (gunakan `pg` +
+   query builder ringan seperti `Kysely` ATAU raw `pg` dengan migration tool
+   terpisah seperti `node-pg-migrate` — pilih SATU, dokumentasikan pilihanmu di
+   `docs/adr/0001-database-tooling.md`, jangan campur beberapa tool migrasi).
+3. Buat `src/infrastructure/database/migrations/` — folder migration, KOSONGKAN
+   untuk saat ini (migration tabel dikerjakan di Fase 1, JANGAN buat tabel apa pun
+   di fase ini).
+4. Jalankan `CREATE EXTENSION IF NOT EXISTS postgis;` sebagai migration paling awal
+   (migration 0000) — ini SATU-SATUNYA migration yang boleh kamu buat di fase ini,
+   karena PostGIS harus aktif sebelum fase manapun berikutnya jalan.
+5. Verifikasi ekstensi aktif dengan query `SELECT PostGIS_Version();` dan tampilkan
+   hasilnya di log startup.
+
+## Environment & config
+- Buat `.env.example` berisi semua variable yang akan dipakai proyek ini secara
+  keseluruhan (boleh mendaftarkan variable yang baru dipakai di fase-fase
+  berikutnya, dengan komentar fase mana yang memakainya), minimal:
+  DATABASE_URL=
+  NODE_ENV=development
+  PORT=3000
+  # Fase 2 — BMKG
+  BMKG_BASE_URL=
+  BMKG_RATE_LIMIT_PER_MIN=
+  # Fase 8 — anti-abuse
+  TURNSTILE_SECRET_KEY=
+  # Fase 9 — tracing
+  OTEL_EXPORTER_OTLP_ENDPOINT=
+- Buat `src/app/config/env.ts` yang memvalidasi environment variable memakai
+  `zod` (fail-fast saat startup jika variable wajib untuk fase-fase yang SUDAH
+  aktif tidak ada — tapi jangan wajibkan variable fase yang belum dikerjakan).
+
+## Middleware dasar (skeleton saja, isi minimal)
+- `src/app/middleware/error-handler.ts` — global error handler Express yang
+  mengembalikan bentuk error JSON konsisten:
+  { "error": { "code": "STRING_CODE", "message": "string" } }
+  (Kode error konkret didaftarkan bertahap di fase-fase berikutnya — untuk fase
+  ini cukup buat SATU kode generik `INTERNAL_ERROR`.)
+- `src/app/middleware/request-logger.ts` — log setiap request (method, path,
+  status, durasi ms) dalam format JSON terstruktur ke stdout (bukan file, karena
+  Replit environment; format ini akan diperluas Fase 9 dengan trace_id).
+- JANGAN buat middleware i18n, anti-abuse, atau tracing sungguhan di fase ini —
+  cukup buat file kosong dengan komentar penanda fase seperti pola README di atas.
+
+## Endpoint yang WAJIB ada di fase ini (dan HANYA ini)
+GET /api/v1/system/health
+  -> 200 { "status": "ok", "database": "connected", "postgis": "<versi>", "timestamp": "<ISO>" }
+  Jika database tidak terkoneksi -> 503 { "status": "degraded", "database": "disconnected" }
+
+## Testing
+- Setup test runner: `vitest` (jangan Jest, agar konsisten dengan ESM + TS modern).
+- Tulis test untuk:
+  1. Health check mengembalikan 200 saat DB terkoneksi.
+  2. Health check mengembalikan 503 saat DB terputus (mock koneksi gagal).
+  3. Environment validator menolak startup jika DATABASE_URL kosong.
+- Tambahkan script `npm test`, `npm run test:watch` di package.json.
+
+## Linting & formatting
+- ESLint + Prettier, konfigurasi TypeScript strict.
+- Tambahkan `npm run lint` dan `npm run typecheck` (tsc --noEmit) di package.json.
+- Tambahkan pre-commit tidak wajib (skip husky, ini bukan prioritas Fase 0).
+
+## Definition of Done — JANGAN klaim fase ini selesai sampai SEMUA poin ini benar:
+- [ ] `npm run dev` menjalankan server tanpa error di port dari env PORT.
+- [ ] `GET /api/v1/system/health` mengembalikan JSON sesuai spesifikasi di atas,
+      tunjukkan hasil curl/response aktual, bukan asumsi.
+- [ ] `SELECT PostGIS_Version();` berhasil dijalankan dan versi PostGIS >= 3.4
+      ditampilkan di log startup — tunjukkan output log aktual.
+- [ ] Semua 11 folder module (`locations` s/d `anti-abuse`) ada dengan file
+      README.md penanda fase di dalamnya.
+- [ ] `npm test` lulus semua test tanpa skip.
+- [ ] `npm run typecheck` tidak menghasilkan error.
+- [ ] `.env.example` lengkap mencakup semua variable dari tabel di atas.
+- [ ] TIDAK ADA logika bisnis (decision engine, BMKG call, scoring) ditulis di
+      fase ini — jika kamu menulisnya, HAPUS, itu di luar scope Fase 0.
+
+Setelah semua poin di atas benar, laporkan ringkasan singkat: struktur folder final,
+hasil test, dan konfirmasi PostGIS aktif. JANGAN lanjut membangun fitur Fase 1
+sampai user memberi instruksi eksplisit untuk lanjut.
+```
