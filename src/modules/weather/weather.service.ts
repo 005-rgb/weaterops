@@ -12,6 +12,7 @@ import {
   type WeatherSlotRepository,
 } from './weather.repository.js';
 import type { CanonicalWeatherSlot } from './weather.types.js';
+import { withSpan } from '../../infrastructure/tracing/setup.js';
 
 export type WeatherServiceErrorCode =
   | 'WEATHER_NOT_CONFIGURED'
@@ -56,7 +57,11 @@ export class WeatherService {
   }> {
     let latest: WeatherSnapshot | null;
     try {
-      latest = await this.options.snapshots.findLatestByLocation(locationCode);
+      latest = await withSpan('cache.lookup', { attributes: { 'location.code': locationCode } }, async (span) => {
+        const value = await this.options.snapshots.findLatestByLocation(locationCode);
+        span.setAttribute('cache.hit', Boolean(value && this.isFresh(value)));
+        return value;
+      });
     } catch (error) {
       throw new WeatherServiceError('WEATHER_CACHE_ERROR', 'Unable to read weather cache', error);
     }
@@ -67,7 +72,18 @@ export class WeatherService {
     console.log(JSON.stringify({ level: 'debug', event: 'weather_cache_miss', locationCode }));
     let raw;
     try {
-      raw = await this.options.client.fetchForecast(locationCode);
+      raw = await withSpan('bmkg.fetch', { attributes: { 'location.code': locationCode } }, async (span) => {
+        try {
+          const value = await this.options.client.fetchForecast(locationCode);
+          span.setAttribute('bmkg.status_code', 200);
+          span.setAttribute('bmkg.retry_count', 0);
+          return value;
+        } catch (error) {
+          span.setAttribute('bmkg.status_code', 503);
+          span.setAttribute('bmkg.retry_count', 2);
+          throw error;
+        }
+      });
     } catch (error) {
       const upstreamCode = error && typeof error === 'object' && 'code' in error
         && typeof error.code === 'string' ? error.code as BmkgErrorCode : null;
@@ -77,7 +93,8 @@ export class WeatherService {
         error,
       );
     }
-    const normalized = normalizeForecast(raw, locationCode);
+    const normalized = await withSpan('weather.normalize', { attributes: { 'location.code': locationCode } },
+      () => normalizeForecast(raw, locationCode));
     const sourceUpdatedAt = getSourceUpdatedAt(raw);
     let snapshot: WeatherSnapshot;
     try {

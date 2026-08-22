@@ -1,3 +1,4 @@
+import './infrastructure/tracing/setup.js';
 import { createApp } from './app.js';
 import { env } from './app/config/env.js';
 import { getPostgisVersion } from './infrastructure/database/client.js';

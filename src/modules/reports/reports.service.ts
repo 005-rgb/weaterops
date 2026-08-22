@@ -1,6 +1,7 @@
 import { pool, withTransaction } from '../../infrastructure/database/client.js';
 import { ApiError } from '../../shared/errors/error-codes.js';
 import { resolveText, type Locale } from '../i18n/i18n.service.js';
+import { withSpan } from '../../infrastructure/tracing/setup.js';
 
 interface ReportReason {
   code: string;
@@ -84,7 +85,8 @@ export async function getOrCreateReport(token: string, locale: Locale = 'id'): P
     [data.resultId, locale],
   );
   if (existing.rows[0]) return existing.rows[0].report_html;
-  const html = await renderHtml(data, locale);
+  const html = await withSpan('report.build', { attributes: { 'report.analysis_id': data.resultId, 'report.locale': locale } },
+    () => renderHtml(data, locale));
   await pool.query(
     `INSERT INTO report_snapshots (analysis_result_id, locale, report_html)
      VALUES ($1, $2, $3) ON CONFLICT (analysis_result_id, locale) DO NOTHING`,
@@ -100,7 +102,8 @@ export async function getOrCreateReport(token: string, locale: Locale = 'id'): P
 export async function generatePdf(token: string, locale: Locale = 'id'): Promise<string> {
   const html = await getOrCreateReport(token, locale);
   const data = await loadReport(token);
-  const pdf = `%PDF-1.4\n% WeatherOps placeholder\n${html.slice(0, 400)}\n%%EOF`;
+  const pdf = await withSpan('pdf.generate', { attributes: { 'report.analysis_id': data.resultId } },
+    () => `%PDF-1.4\n% WeatherOps placeholder\n${html.slice(0, 400)}\n%%EOF`);
   const pdfUrl = `data:application/pdf;base64,${Buffer.from(pdf).toString('base64')}`;
   await withTransaction(async (client) => {
     await client.query(

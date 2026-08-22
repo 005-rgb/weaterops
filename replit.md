@@ -27,6 +27,18 @@ npm test
 npm run lint
 ```
 
+## Fase 9 — tracing
+
+OpenTelemetry SDK memakai W3C Trace Context. Endpoint OTLP dapat diatur melalui
+`OTEL_EXPORTER_OTLP_ENDPOINT`; tanpa endpoint, span dicetak ke stdout melalui
+console exporter untuk development. Setiap request juga mengembalikan header
+`traceparent`, dan error API menyertakan `traceId`.
+
+Endpoint debug `GET /internal/traces/:analysisId` bukan API publik dan wajib
+memakai `X-Internal-Token` yang cocok dengan `INTERNAL_DEBUG_TOKEN`. Token ini
+hanya proxy development; proteksi produksi sebenarnya melalui jaringan internal
+atau VPN harus dikonfirmasi sebagai keputusan infrastruktur terpisah.
+
 ## Penyimpanan provider cuaca
 
 Migration `0004_weather-source-registry` menyediakan katalog provider di

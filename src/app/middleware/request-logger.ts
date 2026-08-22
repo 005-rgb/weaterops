@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express';
+import { currentTraceId } from '../../infrastructure/tracing/setup.js';
 
 export const requestLogger: RequestHandler = (request, response, next) => {
   const startedAt = performance.now();
@@ -9,6 +10,7 @@ export const requestLogger: RequestHandler = (request, response, next) => {
         path: request.originalUrl,
         status: response.statusCode,
         duration_ms: Math.round(performance.now() - startedAt),
+        trace_id: request.traceId ?? currentTraceId(),
       }),
     );
   });

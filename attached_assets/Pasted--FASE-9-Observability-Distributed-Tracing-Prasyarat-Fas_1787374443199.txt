@@ -1,0 +1,127 @@
+# FASE 9 — Observability (Distributed Tracing)
+
+**Prasyarat:** Fase 4 (endpoint end-to-end sudah ada untuk diberi tracing).
+**Boleh paralel dengan:** Fase 5-8 (tidak saling ketergantungan kode langsung,
+tapi paling bermakna jika dikerjakan setelah sebagian besar alur sudah ada
+untuk diberi span).
+**Output fase ini:** W3C Trace Context end-to-end dari HTTP request sampai
+persistence, span wajib di setiap tahap kritis, endpoint debug internal.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 9 dari 11 fase pembangunan WeatherOps. Kamu membangun `tracing` —
+distributed tracing memakai OpenTelemetry SDK dengan W3C Trace Context. Tujuannya
+supaya SETIAP request bisa ditelusuri persis: HTTP request -> cache lookup -> BMKG
+fetch (jika terjadi) -> normalization -> decision engine -> persistence -> response,
+dengan `trace_id` yang SAMA konsisten di seluruh rantai.
+
+## 1. Setup OpenTelemetry SDK
+- Install `@opentelemetry/sdk-node`, `@opentelemetry/auto-instrumentations-node`,
+  `@opentelemetry/exporter-trace-otlp-http` (atau exporter OTLP yang setara).
+- Buat `src/infrastructure/tracing/setup.ts` — inisialisasi SDK PALING AWAL di
+  entry point aplikasi (sebelum import Express/module lain, ini persyaratan
+  teknis OpenTelemetry agar auto-instrumentation bekerja).
+- Exporter endpoint dari env `OTEL_EXPORTER_OTLP_ENDPOINT` (configurable, agar
+  TIDAK mengunci vendor — §39a.1). Untuk development di Replit tanpa backend
+  tracing eksternal terpasang, sediakan fallback exporter ke CONSOLE (log span
+  ke stdout dalam format terbaca) supaya tracing tetap bisa diverifikasi tanpa
+  perlu infrastruktur observability eksternal berbayar.
+
+## 2. W3C Trace Context propagation (§39a.1)
+- Middleware paling awal (`src/app/middleware/trace-context.ts`, letakkan
+  SEBELUM semua middleware lain termasuk rate-limit/anti-abuse dari Fase 8):
+  baca header `traceparent` masuk jika ada (request dari client yang sudah
+  punya trace context), atau GENERATE trace context baru jika tidak ada.
+- Set `req.traceId` yang bisa dipakai di seluruh lapisan aplikasi (controller,
+  service, repository) untuk logging terstruktur.
+- Sertakan `traceparent` di RESPONSE header juga, agar client bisa menyimpan/
+  meneruskan untuk debugging (opsional tapi berguna).
+
+## 3. Span wajib (§39a.1) — implementasikan SEMUA span ini secara eksplisit,
+   jangan hanya mengandalkan auto-instrumentation HTTP generik:
+- `http.request` — otomatis dari instrumentation Express, verifikasi aktif.
+- `cache.lookup` — bungkus logic Fase 2 A.5/A.6 (cek freshness snapshot) dengan
+  span manual: `tracer.startActiveSpan('cache.lookup', ...)`, set attribute
+  `cache.hit: boolean`, `location.code`.
+- `bmkg.fetch` — bungkus `bmgkClient.fetchForecast()` dari Fase 2, HANYA
+  terbentuk span ini JIKA fetch benar-benar terjadi (cache miss) — set attribute
+  `bmkg.status_code`, `bmkg.retry_count`.
+- `weather.normalize` — bungkus normalizer Fase 2 A.3.
+- `decision.evaluate` — bungkus pemanggilan `evaluateDecision()` dari Fase 3 DI
+  SERVICE LAYER (bukan mengubah decision engine itu sendiri yang harus tetap
+  pure tanpa dependency tracing apa pun — span dipasang di TITIK PEMANGGILAN,
+  bukan di dalam fungsi pure-nya). Set attribute `decision.status`,
+  `decision.risk_score`, `decision.scoring_version`.
+- `report.build` — bungkus render report HTML dari Fase 4/5.
+- `pdf.generate` — bungkus PDF generation dari Fase 4, HANYA jika endpoint PDF
+  dipanggil.
+- Setiap span HARUS child dari span request HTTP yang sama (`trace_id` sama),
+  verifikasi ini dengan test (lihat testing di bawah).
+
+## 4. Korelasi dengan logging & system_events (§39a.1, kolom `trace_id` sudah
+   ada di tabel `system_events` dari Fase 1)
+- Update `request-logger` middleware dari Fase 0 agar SETIAP baris log
+  terstruktur menyertakan `trace_id`.
+- Setiap kali service menulis ke `system_events` (event penting: analysis
+  created, BMKG fetch failed, dsb — buat pemanggilan `system_events` di
+  titik-titik ini jika belum ada dari fase sebelumnya), WAJIB sertakan
+  `trace_id` yang aktif saat itu.
+- Update error handler global (Fase 0) agar setiap error response JUGA
+  menyertakan `trace_id` di body (mis. `{ "error": {...}, "traceId": "..." }`)
+  supaya user/support bisa melaporkan trace_id spesifik saat ada masalah.
+
+## 5. Endpoint debug internal (§39a.2) — WAJIB non-publik
+- `GET /internal/traces/:analysisId` — cari `trace_id` yang terkait dengan
+  `analysis_id` tertentu (dari `system_events` yang dicatat saat analysis
+  dibuat), kembalikan ringkasan span/timeline (bisa berupa data mentah dari
+  exporter console log kalau tidak ada backend tracing eksternal, ATAU query
+  langsung ke `system_events` yang match `trace_id` tsb sebagai representasi
+  sederhana timeline).
+- WAJIB dilindungi: middleware terpisah `src/app/middleware/internal-only.ts`
+  yang HANYA mengizinkan akses dari:
+  - request dengan header rahasia `X-Internal-Token` yang cocok dengan env
+    `INTERNAL_DEBUG_TOKEN` (untuk fase ini sebagai proxy sederhana "jaringan
+    internal/VPN" yang disebutkan §39a.2, karena setup VPN sungguhan di luar
+    scope satu sesi coding) — TANDAI eksplisit bahwa proteksi produksi
+    sebenarnya (jaringan internal/VPN) adalah keputusan infrastruktur yang
+    harus dikonfirmasi manusia terpisah, token ini hanya placeholder yang
+    fungsinya setara untuk development.
+  - route ini TIDAK didaftarkan di dokumentasi API publik manapun.
+
+## Testing wajib
+1. Test bahwa satu request `POST /analyses` (cache-miss, sampai memicu BMKG
+   fetch) menghasilkan SEMUA span wajib (`http.request`, `cache.lookup`,
+   `bmkg.fetch`, `weather.normalize`, `decision.evaluate`, `report.build`)
+   dengan `trace_id` yang SAMA persis di semuanya — gunakan in-memory span
+   exporter untuk test (OpenTelemetry SDK punya `InMemorySpanExporter` untuk
+   keperluan ini), assert secara terprogram, bukan hanya baca log manual.
+2. Test bahwa request `POST /analyses` cache-HIT TIDAK menghasilkan span
+   `bmkg.fetch` (karena tidak terjadi) tapi tetap punya `trace_id` konsisten di
+   span lain.
+3. Test bahwa `traceparent` header yang dikirim client (simulasi request
+   berantai) DIWARISI, bukan di-generate ulang (trace_id dari luar tetap
+   dipakai, bukan diganti).
+4. Test endpoint `/internal/traces/:analysisId` menolak akses tanpa token
+   internal yang benar (401/403), dan mengembalikan data timeline yang benar
+   dengan token valid.
+5. Test bahwa error response menyertakan `trace_id` di body.
+
+## Definition of Done
+- [ ] Semua span wajib terbentuk dengan `trace_id` konsisten, dibuktikan dengan
+      test terprogram (bukan hanya visual log).
+- [ ] Cache-hit vs cache-miss menghasilkan span yang berbeda secara benar
+      (span bmkg.fetch hanya muncul saat relevan).
+- [ ] Trace context diwariskan dari request masuk, bukan selalu di-generate baru.
+- [ ] Endpoint debug internal terproteksi dan tidak terdaftar sebagai API publik.
+- [ ] Log terstruktur dan error response menyertakan `trace_id`.
+- [ ] Exporter configurable (OTLP endpoint dari env), dengan fallback console
+      untuk development tanpa infrastruktur eksternal.
+- [ ] `npm run typecheck` bersih, `npm test` lulus semua.
+
+Laporkan: contoh trace lengkap satu request (daftar span dengan trace_id sama),
+hasil test perbedaan cache-hit/miss, dan konfirmasi endpoint debug internal
+tidak accessible tanpa token. Jangan lanjut ke Fase 10 tanpa instruksi eksplisit.
+```

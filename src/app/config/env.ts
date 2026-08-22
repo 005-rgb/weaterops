@@ -21,6 +21,7 @@ const envSchema = z.object({
   POW_DIFFICULTY: z.coerce.number().int().min(1).max(6).default(3),
   POW_TTL_MS: z.coerce.number().int().positive().default(120000),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  INTERNAL_DEBUG_TOKEN: z.string().optional(),
   BOUNDARY_SIMPLIFY_TOLERANCE: z.coerce.number().positive().default(0.001),
 });
 

@@ -16,6 +16,7 @@ import { WeatherService, WeatherServiceError } from '../weather/weather.service.
 import type { CanonicalWeatherSlot } from '../weather/weather.types.js';
 import { weatherSlotStore, weatherSnapshotStore } from '../weather/weather.repository.js';
 import { BmkgClient } from '../../infrastructure/bmkg/bmkg-client.js';
+import { withSpan, currentTraceId } from '../../infrastructure/tracing/setup.js';
 
 export interface AnalysisDependencies {
   weatherService: Pick<WeatherService, 'getForecastWithSnapshot'>;
@@ -118,12 +119,20 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
     if (!profile) {
       throw new ApiError('ACTIVITY_NOT_FOUND', 'Activity profile is not configured', 404);
     }
-    const decision = evaluateDecision({
-      weatherSlots: forecast.slots,
-      activityProfile: profile,
-      scheduledWindow: { start: input.scheduledStart, end: input.scheduledEnd },
-      operationalImpact: input.operationalImpact,
-      forecastHorizonEnd: new Date(Date.parse(input.scheduledEnd) + 24 * 60 * 60 * 1000).toISOString(),
+    const decision = await withSpan('decision.evaluate', {}, (span) => {
+      const value = evaluateDecision({
+        weatherSlots: forecast.slots,
+        activityProfile: profile,
+        scheduledWindow: { start: input.scheduledStart, end: input.scheduledEnd },
+        operationalImpact: input.operationalImpact,
+        forecastHorizonEnd: new Date(Date.parse(input.scheduledEnd) + 24 * 60 * 60 * 1000).toISOString(),
+      });
+      span.setAttributes({
+        'decision.status': value.decisionStatus,
+        'decision.risk_score': value.riskScore,
+        'decision.scoring_version': SCORING_VERSION,
+      });
+      return value;
     });
     const token = generatePublicToken();
     const result = await dependencies.transaction!(async (client) => persist(client, { ...input, sessionKeyHash: input.sessionKeyHash ?? null }, resolved, forecast.weatherSnapshotId, decision, token));
@@ -178,7 +187,11 @@ async function persist(
       [analysisResultId, reason.code, reason.severity, reason.params],
     );
     for (const reference of reason.evidenceRefs) {
-      await client.query(
+   await client.query(
+     `INSERT INTO system_events (trace_id, event_type, payload) VALUES ($1, $2, $3)`,
+     [currentTraceId(), 'analysis.created', { analysis_id: analysisRequestId }],
+   );
+   await client.query(
         `INSERT INTO evidence (decision_reason_id, evidence_type, reference_id, snapshot_data)
          VALUES ($1,$2,$3,$4)`,
         [inserted.rows[0].id, 'weather_forecast', snapshotId, { reference }],

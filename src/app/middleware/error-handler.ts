@@ -2,18 +2,20 @@ import type { ErrorRequestHandler } from 'express';
 import { ZodError } from 'zod';
 import { ApiError } from '../../shared/errors/error-codes.js';
 
-export const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
+export const errorHandler: ErrorRequestHandler = (error, request, response, next) => {
   void next;
   console.error(
     JSON.stringify({
       level: 'error',
       code: 'INTERNAL_ERROR',
       message: error instanceof Error ? error.message : 'Unknown error',
+      trace_id: request.traceId,
     }),
   );
   if (error instanceof ApiError) {
     response.status(error.statusCode).json({
       error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) },
+      traceId: request.traceId,
     });
     return;
   }
@@ -24,6 +26,7 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
         message: 'Request validation failed',
         details: error.flatten(),
       },
+      traceId: request.traceId,
     });
     return;
   }
@@ -33,6 +36,7 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
         code: 'VALIDATION_FAILED',
         message: 'Request body contains invalid JSON',
       },
+      traceId: request.traceId,
     });
     return;
   }
@@ -41,5 +45,6 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
       code: 'INTERNAL_ERROR',
       message: 'Internal server error',
     },
+    traceId: request.traceId,
   });
 };
