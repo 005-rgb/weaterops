@@ -1,0 +1,31 @@
+{
+  "source_updated_at": "2026-08-22T08:00:00+07:00",
+  "data": [
+    {
+      "lokasi": { "adm4": "DUMMY-KEL-1" },
+      "cuaca": [
+        [
+          {
+            "datetime": "2026-08-22T10:00:00+07:00",
+            "t": "31",
+            "hu": "70",
+            "weather_desc": "Cerah Berawan",
+            "weather_desc_en": "Partly Cloudy",
+            "wd": "90",
+            "ws": "10",
+            "tcc": "40"
+          },
+          {
+            "datetime": "2026-08-22T11:00:00+07:00",
+            "t": null,
+            "hu": "not-a-number",
+            "weather_desc": "Nilai Baru BMKG",
+            "wd": null,
+            "ws": null,
+            "tcc": null
+          }
+        ]
+      ]
+    }
+  ]
+}

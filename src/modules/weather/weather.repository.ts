@@ -1,3 +1,4 @@
+import { pool } from '../../infrastructure/database/client.js';
 import { createRepository, type Repository } from '../../infrastructure/database/repository.js';
 
 export interface WeatherSnapshot {
@@ -18,3 +19,27 @@ export const weatherSlotsRepository: Repository<WeatherSlot> = createRepository(
   'weather_slots',
   ['weather_snapshot_id', 'location_code', 'local_datetime', 'weather_desc', 'hazard_score', 'raw_fields'],
 );
+
+export interface WeatherSnapshotRepository {
+  findLatestByLocation(locationCode: string): Promise<WeatherSnapshot | null>;
+  create(data: Partial<WeatherSnapshot>): Promise<WeatherSnapshot>;
+}
+
+export interface WeatherSlotRepository {
+  create(data: Partial<WeatherSlot>): Promise<WeatherSlot>;
+}
+
+export const weatherSnapshotStore: WeatherSnapshotRepository = {
+  async findLatestByLocation(locationCode) {
+    const result = await pool.query(
+      'SELECT * FROM weather_snapshots WHERE location_code = $1 ORDER BY fetched_at DESC LIMIT 1',
+      [locationCode],
+    );
+    return (result.rows[0] as WeatherSnapshot | undefined) ?? null;
+  },
+  create: (data) => weatherSnapshotsRepository.create(data),
+};
+
+export const weatherSlotStore: WeatherSlotRepository = {
+  create: (data) => weatherSlotsRepository.create(data),
+};

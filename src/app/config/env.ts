@@ -7,7 +7,10 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   RETENTION_DAYS: z.coerce.number().int().positive().default(7),
   BMKG_BASE_URL: z.string().optional(),
-  BMKG_RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().optional(),
+  BMKG_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  BMKG_RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(60),
+  BMKG_SCHEMA_FAIL_THRESHOLD_PCT: z.coerce.number().min(0).max(100).default(1),
+  WEATHER_FRESHNESS_MINUTES: z.coerce.number().positive().default(60),
   TURNSTILE_SECRET_KEY: z.string().optional(),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
 });
