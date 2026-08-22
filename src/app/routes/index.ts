@@ -7,6 +7,7 @@ import { analysisRouter } from '../../modules/analysis/analysis.routes.js';
 import { reportsRouter } from '../../modules/reports/reports.routes.js';
 import { sessionBoardRouter } from '../../modules/session-board/session-board.routes.js';
 import { issueAntiAbuseChallenge } from '../middleware/anti-abuse.js';
+import { activitiesRouter } from '../../modules/activities/activities.routes.js';
 
 export const apiRouter = Router();
 apiRouter.use('/system', systemRouter);
@@ -16,4 +17,5 @@ apiRouter.use('/weather/sources', weatherSourceRouter);
 apiRouter.use('/analyses', analysisRouter);
 apiRouter.use('/reports', reportsRouter);
 apiRouter.use('/session-boards', sessionBoardRouter);
+apiRouter.use('/activities', activitiesRouter);
 apiRouter.get('/anti-abuse/challenge', issueAntiAbuseChallenge);

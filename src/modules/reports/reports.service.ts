@@ -9,7 +9,7 @@ interface ReportReason {
   params: Record<string, string | number>;
 }
 
-interface ReportData {
+export interface ReportData {
   resultId: string;
   token: string;
   status: string;
@@ -41,8 +41,8 @@ async function renderHtml(data: ReportData, locale: Locale): Promise<string> {
       escapeHtml(await resolveText(reason.code, locale, reason.params))
     }</li>`));
   const language = locale;
-  return `<!doctype html><html lang="${language}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
- <style>body{font-family:Arial,sans-serif;max-width:760px;margin:40px auto;color:#18212f}h1{color:#125b8c}.summary{border:1px solid #ccd6e0;padding:20px;border-radius:8px}li{margin:8px 0}.disclaimer{margin-top:32px;color:#5d6875;font-size:small}</style></head>
+  return `<!doctype html><html lang="${language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(title)}</title>
+ <style>:root{font-family:Arial,sans-serif;color:#edf1ff;background:#080b17;--surface:#0e1221;--line:#343b5b;--muted:#aab2cf;--accent:#92a7ff;--green:#77e5bf}body{max-width:760px;margin:0 auto;padding:40px 24px;background:#080b17;color:#edf1ff}h1{font-size:32px;letter-spacing:-.04em}.summary{border:1px solid var(--line);padding:24px;border-radius:16px;background:var(--surface)}.summary strong{color:var(--accent)}li{margin:10px 0}.disclaimer{margin-top:32px;padding:16px;border-left:3px solid #b79aff;color:var(--muted);font-size:small;line-height:1.6}.risk{font-size:24px;color:var(--green)}</style></head>
  <body><h1>${escapeHtml(title)}</h1><div class="summary">
  <p><strong>${escapeHtml(decision)}:</strong> ${escapeHtml(await resolveText(`status.${data.status}`, locale))}</p>
  <p><strong>${escapeHtml(riskScore)}:</strong> ${escapeHtml(data.riskScore)}</p>
@@ -54,7 +54,7 @@ async function renderHtml(data: ReportData, locale: Locale): Promise<string> {
  </body></html>`;
 }
 
-async function loadReport(token: string): Promise<ReportData> {
+export async function loadReport(token: string): Promise<ReportData> {
   const result = await pool.query(
     `SELECT ar.id AS result_id, ar.public_token, ar.decision_status, ar.risk_score,
             ar.risk_label, ar.confidence, ar.created_at, ar.expires_at, ar.deleted_at,
