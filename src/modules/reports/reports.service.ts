@@ -36,7 +36,7 @@ async function renderHtml(data: ReportData, locale: Locale): Promise<string> {
       resolveText('label.disclaimer', locale),
     ]);
   const reasonItems = await Promise.all(data.reasons.map(async (reason) =>
-    `<li><strong>${escapeHtml(reason.severity)}</strong>: ${
+    `<li><strong>${escapeHtml(await resolveText(`severity.${reason.severity}`, locale))}</strong>: ${
       escapeHtml(await resolveText(reason.code, locale, reason.params))
     }</li>`));
   const language = locale;
@@ -45,8 +45,8 @@ async function renderHtml(data: ReportData, locale: Locale): Promise<string> {
  <body><h1>${escapeHtml(title)}</h1><div class="summary">
  <p><strong>${escapeHtml(decision)}:</strong> ${escapeHtml(await resolveText(`status.${data.status}`, locale))}</p>
  <p><strong>${escapeHtml(riskScore)}:</strong> ${escapeHtml(data.riskScore)}</p>
- <p><strong>${escapeHtml(riskLabel)}:</strong> ${escapeHtml(data.riskLabel)}</p>
- <p><strong>${escapeHtml(confidence)}:</strong> ${escapeHtml(data.confidence)}</p>
+ <p><strong>${escapeHtml(riskLabel)}:</strong> ${escapeHtml(await resolveText(`risk.${data.riskLabel}`, locale))}</p>
+ <p><strong>${escapeHtml(confidence)}:</strong> ${escapeHtml(await resolveText(`confidence.${data.confidence}`, locale))}</p>
  <p><strong>${escapeHtml(analysisTime)}:</strong> ${escapeHtml(data.createdAt.toISOString())}</p></div>
  <h2>${escapeHtml(reasonsTitle)}</h2><ul>${reasonItems.join('') || `<li>${escapeHtml(noReasons)}</li>`}</ul>
  <p class="disclaimer">${escapeHtml(disclaimer)}</p>
