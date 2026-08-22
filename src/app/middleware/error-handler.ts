@@ -27,6 +27,15 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
     });
     return;
   }
+  if (error instanceof SyntaxError && 'statusCode' in error && error.statusCode === 400) {
+    response.status(400).json({
+      error: {
+        code: 'VALIDATION_FAILED',
+        message: 'Request body contains invalid JSON',
+      },
+    });
+    return;
+  }
   response.status(500).json({
     error: {
       code: 'INTERNAL_ERROR',
