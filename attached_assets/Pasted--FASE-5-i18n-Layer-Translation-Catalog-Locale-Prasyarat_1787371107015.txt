@@ -1,0 +1,147 @@
+# FASE 5 — i18n Layer (Translation Catalog & Locale)
+
+**Prasyarat:** Fase 1 (tabel `translation_catalog` ada), Fase 3 (daftar reason
+codes lengkap di `reason-codes.ts`), Fase 4 (endpoint report render teks sementara).
+**Boleh paralel dengan:** Fase 2-4 jika belum selesai, TAPI fase ini membutuhkan
+daftar reason codes final dari Fase 3 dan endpoint report dari Fase 4 untuk
+diintegrasikan — jadi sebaiknya tetap dikerjakan SETELAH keduanya ada meski secara
+teknis modulnya independen.
+**Output fase ini:** Katalog terjemahan terisi penuh, backend TIDAK PERNAH lagi
+mengembalikan teks bebas satu-bahasa, locale switching berfungsi end-to-end tanpa
+memicu kalkulasi ulang.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 5 dari 11 fase pembangunan WeatherOps. Kamu membangun lapisan i18n yang
+akan dipakai SELURUH fase berikutnya. Prinsip inti (§2.9 Language Parity, §27a,
+§42d): backend TIDAK PERNAH menyimpan atau mengembalikan teks bebas satu-bahasa
+untuk field yang wajib dwibahasa — hanya kode + parameter terstruktur, lalu lapisan
+render (yang kamu bangun di fase ini) me-resolve ke teks dari katalog.
+
+## 1. Isi `translation_catalog` (tabel sudah ada dari Fase 1)
+- Buat migration/seed yang mengisi baris untuk SETIAP reason code yang didaftarkan
+  di `src/modules/decision-engine/reason-codes.ts` (Fase 3), untuk KEDUA locale
+  ('id' dan 'en'). Contoh:
+  ```
+  code='HEAVY_RAIN_CRITICAL_SLOT', locale='id',
+    template='Hujan lebat berada di dalam waktu kerja pada pukul {slot_time}.'
+  code='HEAVY_RAIN_CRITICAL_SLOT', locale='en',
+    template='Heavy rain falls within the work window at {slot_time}.'
+  ```
+- SETIAP kode HARUS punya entri di KEDUA locale — buat test yang GAGAL jika ada
+  kode di `reason-codes.ts` yang tidak punya pasangan lengkap id+en di
+  `translation_catalog` (ini test paling penting di fase ini, jangan dilewati).
+- Field `reviewed_by_human` di seed awal SEMUA `false` — ini akan di-set manual
+  oleh manusia setelah review (relevan khusus untuk disclaimer hukum di Fase 11,
+  tapi kolomnya berlaku general untuk semua entri katalog).
+- Tambahkan JUGA entri katalog untuk string UI non-reason yang sudah ada dari
+  fase sebelumnya (mis. label status report seperti 'Cerah', 'Berawan', label
+  `decision_status` seperti 'PROCEED' -> 'Lanjutkan sesuai jadwal' / 'Proceed as
+  scheduled') — kumpulkan SEMUA teks yang saat ini masih hardcoded di report HTML
+  Fase 4 dan pindahkan semuanya ke katalog ini. Cari secara sistematis (grep) semua
+  string Indonesia/Inggris hardcoded di modul `reports` dan `decision-engine` yang
+  seharusnya melalui katalog, jangan hanya yang jelas terlihat.
+
+## 2. Katalog resolver (`src/modules/i18n/i18n.service.ts`)
+```ts
+function resolveText(code: string, locale: 'id'|'en', params: Record<string, string|number>): string
+```
+- Ambil template dari `translation_catalog` (dengan caching in-memory, refresh
+  berkala atau saat startup — dokumentasikan strategi cache-mu, karena tabel ini
+  jarang berubah tapi dipanggil sangat sering).
+- Lakukan interpolasi `{param_name}` -> nilai dari `params`.
+- Jika kode TIDAK ditemukan di katalog untuk locale yang diminta -> JANGAN
+  crash dan JANGAN tampilkan kode mentah ke user. Fallback ke locale 'id' jika
+  yang diminta 'en' tidak ada; jika 'id' pun tidak ada, log error level ERROR
+  (kode hilang dari katalog adalah bug produksi) dan kembalikan placeholder
+  yang jelas ditandai untuk developer (mis. `[[MISSING:{code}]]`) — TAPI pastikan
+  test kamu di poin 1 di atas membuat skenario ini seharusnya tidak pernah
+  terjadi di production karena semua kode sudah divalidasi lengkap.
+
+## 3. Middleware locale (`src/app/middleware/locale.ts`)
+- Baca `Accept-Language` header, HANYA terima `id` atau `en` (nilai lain ->
+  fallback ke `id` default, JANGAN error).
+- Terima JUGA query param `?lang=id|en` sebagai override (untuk link yang
+  dibagikan, sesuai §32a Locale) — query param menang atas header jika keduanya ada.
+- Set `req.locale` yang dipakai controller/service di sepanjang request ini.
+
+## 4. Integrasi ke endpoint yang SUDAH ada dari Fase 4
+- `POST /api/v1/analyses`: simpan `locale` dari `req.locale` ke kolom
+  `analysis_requests.locale` (kolom sudah ada dari Fase 1) — JANGAN ubah bahasa
+  ANALYSIS setelah dibuat (locale request adalah locale SAAT dibuat, bukan
+  preferensi yang bisa berubah retroaktif untuk request itu).
+- `GET /reports/:publicToken`: HAPUS implementasi sementara Fase 4 yang render
+  teks hardcoded. Ganti dengan render memakai `resolveText()` untuk SETIAP
+  reason dan label status, sesuai locale yang diminta (dari `req.locale`, BUKAN
+  dari `analysis_requests.locale` yang tersimpan — user boleh melihat report yang
+  sama dalam bahasa berbeda dari yang dipakai saat membuatnya, ini yang dimaksud
+  §42d.2 "perubahan bahasa tidak memicu re-kalkulasi, hanya me-render ulang teks
+  dari katalog terhadap data yang sama").
+- KRUSIAL: pastikan `report_snapshots` immutability dari Fase 4 (§30, §72) TIDAK
+  DILANGGAR oleh perubahan ini. Jika sebelumnya satu `report_snapshots` row =
+  satu analysis, sekarang harus jadi: satu row PER KOMBINASI (analysis, locale) —
+  cek `report_snapshots.locale` (kolom sudah ada dari Fase 1 §11a) sebelum
+  render ulang: jika snapshot untuk (analysis_id, locale) yang diminta SUDAH ada,
+  kembalikan yang sudah ada; jika belum, render baru untuk locale itu dan simpan
+  sebagai row baru — snapshot lama untuk locale lain TETAP tidak berubah/immutable.
+- Tulis test migrasi/regresi eksplisit yang membuktikan poin di atas: buat report
+  locale 'id', lalu minta locale 'en' untuk analysis yang SAMA -> harus jadi 2
+  row terpisah di `report_snapshots`, keduanya immutable setelah dibuat masing-masing.
+
+## 5. Golden test cases dwibahasa (§42d.5) — perluasan dari golden test Fase 3
+- Ambil ULANG 8 skenario golden test dari Fase 3 (decision engine level).
+- Untuk SETIAP skenario, jalankan end-to-end lewat API (Fase 4) dengan
+  `Accept-Language: id` dan `Accept-Language: en` secara terpisah.
+- Assert bahwa `decision.status`, `riskScore`, `riskLabel`, `confidence` IDENTIK
+  di kedua bahasa (karena ini hasil decision engine yang bahasa-netral, §84).
+- Assert bahwa JUMLAH reasons yang muncul IDENTIK di kedua bahasa (hanya teksnya
+  yang beda, bukan jumlah/struktur alasannya) — ini membuktikan §84 language
+  invariant: "Same decision_reasons.code -> Identical meaning in ID and EN ->
+  Resolved from single versioned translation catalog".
+- Catatan: PRD mensyaratkan review oleh "penutur asli/profesional kedua bahasa"
+  untuk memverifikasi makna substantif identik — INI TIDAK BISA divalidasi
+  otomatis oleh test. Test otomatis HANYA memverifikasi STRUKTUR (kode sama,
+  jumlah sama, parameter terisi benar). Tandai eksplisit di laporan akhir fase
+  bahwa review makna oleh manusia bilingual TETAP diperlukan sebagai langkah
+  terpisah (bagian dari Fase 11 QA), bukan sesuatu yang bisa "dianggap selesai"
+  oleh agent.
+
+## 6. String UI frontend (persiapan untuk Fase 10)
+- Setup `i18next` sebagai dependency (belum ada UI nyata sampai Fase 10, tapi
+  siapkan struktur folder `src/frontend/locales/id/*.json` dan
+  `src/frontend/locales/en/*.json` dengan namespace terpisah per modul (`common`,
+  `report`, `errors`, `methodology`) sesuai §8.8 — isi HANYA string yang SUDAH
+  pasti dibutuhkan dari fase-fase sebelumnya (label umum seperti tombol
+  "Lanjutkan"/"Continue", bukan string wizard yang belum ada UI-nya).
+- JANGAN bangun komponen React/frontend penuh di fase ini — itu Fase 10. Fase ini
+  hanya menyiapkan STRUKTUR file locale agar Fase 10 tinggal mengisi, bukan
+  membangun sistem i18n dari nol lagi.
+
+## Definition of Done
+- [ ] SEMUA reason code di `reason-codes.ts` punya entri lengkap id+en di
+      `translation_catalog` — test otomatis yang memverifikasi ini lulus.
+- [ ] `resolveText()` berfungsi dengan fallback yang aman (tidak pernah crash,
+      tidak pernah expose kode mentah ke end user di jalur normal).
+- [ ] `GET /reports/:publicToken?lang=id` dan `?lang=en` untuk analysis YANG SAMA
+      menghasilkan 2 row `report_snapshots` terpisah, immutable, dan pemanggilan
+      berulang untuk locale yang sama TIDAK menghasilkan row baru (masih
+      mengikuti §73 no silent recalculation dari Fase 4).
+- [ ] Semua 8 golden test case lulus di KEDUA locale dengan struktur decision
+      identik (angka/status sama, hanya teks beda).
+- [ ] Tidak ada lagi string teks bebas hardcoded di modul `reports` dan
+      `decision-engine` untuk field yang wajib dwibahasa (buktikan dengan grep/
+      pencarian sistematis, tunjukkan hasilnya).
+- [ ] Struktur folder locale frontend (`src/frontend/locales/`) siap untuk diisi
+      Fase 10.
+- [ ] `npm run typecheck` bersih, `npm test` lulus semua.
+
+Laporkan: bukti test kelengkapan katalog (semua kode punya pasangan id+en),
+contoh response report yang sama dalam 2 bahasa berdampingan, dan konfirmasi
+eksplisit bahwa review makna oleh manusia bilingual masih perlu dijadwalkan
+terpisah di Fase 11 — jangan klaim ini "selesai" dari sisi linguistik, hanya
+"selesai" dari sisi struktur teknis. Jangan lanjut ke Fase 6 tanpa instruksi
+eksplisit.
+```

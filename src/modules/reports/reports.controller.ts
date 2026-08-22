@@ -8,7 +8,7 @@ function tokenFrom(request: Parameters<RequestHandler>[0]): string {
 
 export const getReport: RequestHandler = async (request, response, next) => {
   try {
-    const html = await getOrCreateReport(tokenFrom(request));
+    const html = await getOrCreateReport(tokenFrom(request), request.locale);
     response.type('html').send(html);
   } catch (error) {
     next(error);
@@ -17,7 +17,7 @@ export const getReport: RequestHandler = async (request, response, next) => {
 
 export const createPdf: RequestHandler = async (request, response, next) => {
   try {
-    const pdfUrl = await generatePdf(tokenFrom(request));
+    const pdfUrl = await generatePdf(tokenFrom(request), request.locale);
     response.json({ pdfUrl });
   } catch (error) {
     next(error);

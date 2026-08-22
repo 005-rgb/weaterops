@@ -78,3 +78,16 @@ dipakai sebagai jalur tersebut. Error API menggunakan bentuk:
 Migrasi database dan golden integration tests memerlukan `DATABASE_URL` dengan
 PostgreSQL/PostGIS aktif. Tanpa koneksi tersebut, unit test/typecheck/lint tetap
 dapat dijalankan, tetapi endpoint database akan berstatus degraded.
+
+## Fase 5 — i18n
+
+Locale hanya menerima `id` atau `en`. Gunakan `?lang=id|en` sebagai override
+`Accept-Language`; default-nya `id`. `POST /api/v1/analyses` menyimpan locale
+saat request dibuat, sedangkan report dapat dirender ulang dalam locale lain
+tanpa menghitung ulang keputusan. Setiap kombinasi analysis dan locale memiliki
+snapshot immutable sendiri. Katalog di-cache in-memory selama lima menit dan
+diisi oleh migration `0007_translation-catalog`.
+
+Terjemahan awal sengaja `reviewed_by_human=false`. Review makna substantif oleh
+penutur asli/profesional bilingual masih harus dijadwalkan terpisah pada Fase 11;
+test hanya memverifikasi kelengkapan struktur dan invariant bahasa-netral.

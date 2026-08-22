@@ -1,0 +1,10 @@
+{
+  "title": "WeatherOps Operational Weather Report",
+  "decision": "Decision",
+  "riskScore": "Risk score",
+  "riskLabel": "Risk label",
+  "confidence": "Confidence",
+  "analysisTime": "Analysis time",
+  "reasons": "Reasons",
+  "noReasons": "No additional reasons."
+}

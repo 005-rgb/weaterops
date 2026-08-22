@@ -1,0 +1,10 @@
+{
+  "title": "Laporan Operasional Cuaca WeatherOps",
+  "decision": "Keputusan",
+  "riskScore": "Skor risiko",
+  "riskLabel": "Label risiko",
+  "confidence": "Tingkat keyakinan",
+  "analysisTime": "Waktu analisis",
+  "reasons": "Alasan",
+  "noReasons": "Tidak ada alasan tambahan."
+}
