@@ -1,0 +1,193 @@
+# FASE 3 — Decision Engine (Pure / Deterministic)
+
+**Prasyarat:** Fase 2 selesai (`CanonicalWeatherSlot[]` tersedia dari modul `weather`).
+**Output fase ini:** Modul `decision-engine` — scoring, hazard mapping, activity
+profile evaluation, risk label, confidence, critical slot rule, alternative windows,
+dan reason engine berbasis kode (bukan teks bebas). Modul ini WAJIB pure function:
+input sama selalu menghasilkan output sama, tidak ada I/O (tidak query DB, tidak
+panggil BMKG) di dalam engine itu sendiri.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 3 dari 11 fase pembangunan WeatherOps. Kamu membangun `decision-engine` —
+JANTUNG produk ini. Modul ini HARUS murni deterministik (pure function): tidak ada
+`Date.now()`, tidak ada random, tidak ada query database, tidak ada network call
+DI DALAM engine. Semua input (weather slots, activity profile, operational impact,
+waktu evaluasi) dilewatkan sebagai parameter eksplisit. Ini adalah invariant paling
+penting di seluruh produk (§84 Engineering North Star):
+
+  Same Input + Same Forecast Snapshot + Same Activity Profile Version
+  + Same Scoring Version + Same Decision Engine Version
+  = Same Decision, selalu, tanpa kecuali.
+
+JANGAN implementasikan endpoint API di fase ini (itu Fase 4) — hanya fungsi murni
+yang dites langsung tanpa HTTP layer.
+
+## 1. Hazard Mapping (§17) — isi tabel yang skeleton-nya dibuat Fase 2 (A.4)
+- Definisikan `HAZARD_SCORE_TABLE: Record<WeatherDescCode, number>` — skor hazard
+  dasar per kondisi cuaca (skala 0-100, dokumentasikan rasionalnya di komentar,
+  mis. cerah=0, hujan ringan=20, hujan lebat=70, hujan petir=90).
+- Kondisi `'UNKNOWN'` HARUS memiliki penanganan eksplisit: JANGAN diberi skor 0
+  (itu menyembunyikan risiko) dan JANGAN diberi skor tinggi sembarangan (itu
+  false alarm) — beri hazard score yang mencerminkan ketidakpastian (mis. skor
+  netral-tinggi seperti 50) DAN turunkan `confidence` secara otomatis untuk slot
+  manapun yang mengandung UNKNOWN (lihat bagian Confidence di bawah). Dokumentasikan
+  keputusan ini eksplisit karena ini adalah keputusan produk, bukan detail teknis.
+
+## 2. Activity Profile Evaluation (§18) — isi `hazard_sensitivity` yang tadinya kosong di Fase 1
+- Definisikan struktur `hazard_sensitivity` untuk profile `CONCRETE_POUR` (profil
+  terkuat/paling detail sesuai PRD §1 "concrete pouring as the strongest profile"):
+  ```ts
+  interface HazardSensitivity {
+    hazardWeights: Record<WeatherDescCode, number>;  // 0-1, seberapa sensitif
+                                                        // aktivitas ini terhadap
+                                                        // tiap kondisi cuaca
+    criticalWindowHours: number;   // durasi kritis pasca-aktivitas yang masih
+                                     // rentan (mis. beton butuh X jam bebas hujan
+                                     // setelah dituang)
+    minAcceptableConfidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  }
+  ```
+- Untuk pengecoran beton, hujan yang jatuh SELAMA proses DAN dalam jendela kritis
+  SETELAH proses (curing awal) sama-sama harus dihitung — implementasikan evaluasi
+  yang melihat slot waktu aktivitas + slot waktu setelahnya sesuai
+  `criticalWindowHours`, bukan hanya slot saat aktivitas berlangsung.
+- Buat minimal 2 activity profile lain dengan struktur sama tapi bobot lebih
+  sederhana (mis. `EARTHWORK` / pekerjaan tanah, `ROOFING` / pekerjaan atap) agar
+  engine terbukti generik, bukan di-hardcode khusus pengecoran.
+
+## 3. Scoring (§20)
+- `calculateRiskScore(weatherSlots: CanonicalWeatherSlot[], profile: ActivityProfile,
+   scheduledWindow: TimeRange): RiskScoreResult`
+- Skor akhir 0-100, kombinasi hazard score tiap slot relevan dengan bobot profile.
+- Dokumentasikan formula eksplisit di komentar (jangan black-box) — mis. skor
+  tertimbang dari slot dengan bobot lebih besar pada slot yang overlap langsung
+  dengan jadwal kerja vs jendela kritis pasca-kerja.
+- `scoring_version` harus konstanta yang di-bump manual setiap formula berubah
+  (§53 Versioning) — simpan sebagai `export const SCORING_VERSION = 'v1.0.0'`.
+
+## 4. Risk Label (§21)
+- Mapping skor -> label: LOW (0-24), MODERATE (25-49), HIGH (50-74), VERY_HIGH (75-100)
+  — TANDAI angka batas ini sebagai keputusan produk yang harus disetujui product
+  owner, bukan angka teknis final tanpa review.
+
+## 5. Decision Status (§22) & Critical Slot Rule (§23)
+- Enum: PROCEED, MOVE_EARLIER, DEFER, ALTERNATIVE_WINDOW, PROCEED_WITH_MITIGATION,
+  NOT_RECOMMENDED (harus PERSIS sama dengan CHECK constraint di tabel
+  `analysis_results` dari Fase 1 — JANGAN tambah/ubah nilai tanpa migration baru).
+- Critical Slot Rule: jika ADA SATU SAJA slot dalam jendela kerja+kritis yang
+  hazard-nya di atas ambang "tidak bisa dimitigasi" (mis. hujan petir/hujan lebat
+  pada aktivitas sensitif tinggi), maka decision TIDAK BOLEH PROCEED apa pun skor
+  rata-ratanya — implementasikan ini sebagai override eksplisit di atas hasil
+  scoring rata-rata, bukan hanya mengandalkan angka agregat (§23 namanya "critical
+  slot rule" justru karena satu slot kritis bisa membatalkan hasil rata-rata yang
+  tampak aman).
+- Tulis fungsi `determineDecisionStatus(riskScore, criticalSlotViolated, profile):
+  DecisionStatus` terpisah dari kalkulasi skor, agar logikanya bisa diuji sendiri.
+
+## 6. Confidence (§24)
+- Confidence BUKAN probabilitas hujan (§0 baseline decision — ini prinsip produk
+  yang tidak boleh dilanggar). Confidence mencerminkan seberapa lengkap/segar data
+  yang dipakai untuk membuat keputusan.
+- Turunkan confidence jika: ada slot `UNKNOWN` dalam jendela relevan, snapshot
+  weather mendekati batas freshness (§15), atau slot coverage tidak lengkap (§25,
+  lihat poin 7).
+- `calculateConfidence(weatherSlots, snapshotAge, slotCoverage): 'LOW'|'MEDIUM'|'HIGH'`
+
+## 7. Slot Coverage (§25)
+- Jika jadwal kerja user melewati batas horizon forecast BMKG (mis. request untuk
+  5 hari ke depan tapi BMKG hanya menyediakan 3 hari), engine harus tahu bagian
+  mana yang TIDAK punya data dan menurunkan confidence untuk bagian itu — JANGAN
+  diam-diam mengasumsikan cuaca di luar horizon sama dengan slot terakhir yang ada.
+
+## 8. Alternative Windows (§26)
+- Jika decision = DEFER atau ALTERNATIVE_WINDOW, engine harus mengevaluasi slot-slot
+  lain dalam horizon forecast yang tersedia dan mengembalikan daftar jendela waktu
+  alternatif dengan risk score masing-masing, diurutkan dari risiko terendah.
+- `findAlternativeWindows(weatherSlots, profile, originalWindow, horizonEnd):
+  AlternativeWindow[]`
+
+## 9. Reason Engine berbasis kode (§27, diperluas §27a)
+- Engine TIDAK PERNAH mengembalikan teks bebas (bahasa apa pun). Output HANYA:
+  ```ts
+  interface DecisionReason {
+    code: string;              // mis. 'HEAVY_RAIN_CRITICAL_SLOT'
+    severity: 'info'|'warning'|'critical';
+    params: Record<string, string | number>;   // mis. { slot_time: '13:00', hazard: 'heavy_rain' }
+    evidenceRefs: string[];    // referensi ke slot/data yang mendasari alasan ini
+  }
+  ```
+- Daftarkan SEMUA kode alasan yang mungkin dihasilkan engine ini di satu file
+  `src/modules/decision-engine/reason-codes.ts` sebagai const enum/union type —
+  ini akan jadi acuan Fase 5 untuk mengisi translation catalog. Minimal termasuk:
+  `HEAVY_RAIN_CRITICAL_SLOT`, `UNKNOWN_WEATHER_LOW_CONFIDENCE`,
+  `INCOMPLETE_SLOT_COVERAGE`, `CRITICAL_WINDOW_RAIN_RISK`, `CLEAR_CONDITIONS_PROCEED`,
+  `ALTERNATIVE_WINDOW_AVAILABLE`.
+- Setiap kode HARUS punya evidence_refs yang bisa ditelusuri balik ke weather slot
+  spesifik (§28, §50, §51 auditability) — jangan buat reason tanpa bukti terlampir.
+
+## 10. Fungsi utama orkestrasi (tetap pure, tanpa I/O)
+```ts
+function evaluateDecision(input: {
+  weatherSlots: CanonicalWeatherSlot[];
+  activityProfile: ActivityProfile;
+  scheduledWindow: TimeRange;
+  operationalImpact: OperationalImpactInput;
+  forecastHorizonEnd: string;
+}): DecisionEngineResult
+```
+`DecisionEngineResult` berisi: riskScore, riskLabel, decisionStatus, confidence,
+reasons (DecisionReason[]), alternativeWindows, scoringVersion, decisionEngineVersion.
+
+## 11. Versioning (§53)
+- `export const DECISION_ENGINE_VERSION = 'v1.0.0'` terpisah dari `SCORING_VERSION`
+  — keduanya di-bump independen sesuai apa yang berubah (formula scoring vs logika
+  status/reason).
+
+## Testing wajib — INI BAGIAN PALING PENTING DI FASE INI
+1. **Determinism test**: panggil `evaluateDecision` 100x dengan input identik,
+   assert SEMUA 100 hasil byte-identik (JSON.stringify sama persis).
+2. **Golden test cases** (§54, versi awal — akan diperluas dwibahasa di Fase 5):
+   buat minimal 8 skenario tetap sebagai fixture:
+   - cuaca cerah sepanjang jendela kerja -> PROCEED, risk LOW.
+   - hujan lebat tepat di jendela kerja aktivitas CONCRETE_POUR -> DEFER atau
+     NOT_RECOMMENDED, risk VERY_HIGH, critical slot rule triggered.
+   - hujan ringan di luar jendela kritis -> PROCEED_WITH_MITIGATION.
+   - kondisi UNKNOWN mendominasi slot -> confidence LOW, reason
+     UNKNOWN_WEATHER_LOW_CONFIDENCE muncul.
+   - slot coverage tidak lengkap (request melewati horizon BMKG) -> reason
+     INCOMPLETE_SLOT_COVERAGE muncul, confidence turun.
+   - cuaca buruk di jadwal asli tapi ada slot bersih di hari berikutnya dalam
+     horizon -> ALTERNATIVE_WINDOW dengan daftar jendela terurut benar.
+   - hazard tinggi TAPI rata-rata skor rendah karena banyak slot bagus (test
+     eksplisit bahwa critical slot rule override rata-rata, bukan hanya threshold
+     rata-rata biasa).
+   - dua activity profile berbeda dengan weather slots SAMA persis harus
+     menghasilkan decision BERBEDA sesuai sensitivitas masing-masing (bukti engine
+     generik, bukan hardcode).
+3. Test bahwa setiap `DecisionReason` yang dihasilkan SELALU punya minimal 1
+   `evidenceRefs` yang valid.
+4. Test bahwa TIDAK ADA satupun path kode di decision-engine yang memanggil
+   `Date.now()`, database client, atau HTTP client — bisa pakai static
+   analysis/lint rule custom atau review manual + assertion di test bahwa modul
+   ini tidak mengimpor modul database/http sama sekali.
+
+## Definition of Done
+- [ ] Semua fungsi di atas terimplementasi sebagai pure function, tanpa I/O.
+- [ ] Determinism test lulus 100/100 identik.
+- [ ] Minimal 8 golden test case di atas lulus dengan hasil sesuai ekspektasi
+      yang didokumentasikan per skenario.
+- [ ] Critical slot rule terbukti override rata-rata skor (test eksplisit ada).
+- [ ] Setiap reason code punya evidence_refs, tidak ada reason "kosong".
+- [ ] SCORING_VERSION dan DECISION_ENGINE_VERSION terpisah dan tercantum di setiap
+      DecisionEngineResult.
+- [ ] Modul ini terbukti tidak mengimpor database/HTTP client apa pun.
+- [ ] `npm run typecheck` bersih.
+
+Laporkan: hasil determinism test, ringkasan 8 golden case beserta hasilnya,
+dan konfirmasi eksplisit bahwa engine 100% pure. Jangan lanjut ke Fase 4 tanpa
+instruksi eksplisit.
+```
