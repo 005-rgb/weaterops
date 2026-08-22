@@ -32,6 +32,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const normalizedSource = {
     ...source,
     BMKG_RATE_LIMIT_PER_MIN: source.BMKG_RATE_LIMIT_PER_MIN?.trim() || undefined,
+    SESSION_KEY_SALT: source.SESSION_KEY_SALT?.trim() || undefined,
     IP_HASH_SALT: source.IP_HASH_SALT?.trim() || undefined,
   };
   const result = envSchema.safeParse(normalizedSource);

@@ -1,0 +1,469 @@
+~/workspace$ cp .env.example .env
+npm install
+npm run db:migrate
+npm run seed:dev
+npm run dev
+
+added 48 packages, and audited 521 packages in 2s
+
+110 packages are looking for funding
+  run `npm fund` for details
+
+5 vulnerabilities (1 moderate, 4 high)
+
+To address issues that do not require attention, run:
+  npm audit fix
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+
+> weatherops@0.1.0 db:migrate
+> node-pg-migrate -m src/infrastructure/database/migrations up
+
+> Migrating files:
+> - 0000_enable-postgis
+> - 0001_enable-pgcrypto
+> - 0002_core-schema
+> - 0003_weather_nullable_source_fields
+> - 0004_weather-source-registry
+> - 0005_permanent_reference_seed
+> - 0006_permanent_api_history
+> - 0007_translation-catalog
+> - 0008_session-board-unique
+> - 0009_session-board-translation
+### MIGRATION 0000_enable-postgis (UP) ###
+CREATE EXTENSION IF NOT EXISTS postgis;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0000_enable-postgis', NOW());
+
+
+### MIGRATION 0001_enable-pgcrypto (UP) ###
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0001_enable-pgcrypto', NOW());
+
+
+### MIGRATION 0002_core-schema (UP) ###
+
+    CREATE OR REPLACE FUNCTION weatherops_expires_at(days integer DEFAULT NULL)
+    RETURNS timestamptz
+    LANGUAGE sql
+    STABLE
+    AS $$
+      SELECT now() + make_interval(days => COALESCE(
+        days,
+        NULLIF(current_setting('weatherops.retention_days', true), '')::integer,
+        7
+      ));
+    $$;
+
+    CREATE OR REPLACE FUNCTION weatherops_touch_updated_at()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      NEW.updated_at = now();
+      RETURN NEW;
+    END;
+    $$;
+
+    CREATE TABLE locations (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      code text NOT NULL UNIQUE,
+      parent_code text NULL REFERENCES locations(code),
+      level text NOT NULL CHECK (level IN ('adm1','adm2','adm3','adm4')),
+      name text NOT NULL,
+      full_name text NOT NULL,
+      active boolean NOT NULL DEFAULT true,
+      geometry geometry(MultiPolygon, 4326) NULL,
+      geometry_simplified geometry(MultiPolygon, 4326) NULL,
+      boundary_source text NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX idx_locations_parent_code ON locations(parent_code);
+    CREATE INDEX idx_locations_level ON locations(level);
+    CREATE INDEX idx_locations_geometry ON locations USING gist(geometry);
+    CREATE INDEX idx_locations_geometry_simplified ON locations USING gist(geometry_simplified);
+
+    CREATE TABLE activity_profiles (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      code text NOT NULL,
+      version integer NOT NULL,
+      name_id text NOT NULL,
+      name_en text NOT NULL,
+      hazard_sensitivity jsonb NOT NULL,
+      active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE(code, version)
+    );
+
+    CREATE TABLE weather_snapshots (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      location_code text NOT NULL REFERENCES locations(code),
+      source text NOT NULL DEFAULT 'BMKG',
+      raw_response jsonb NOT NULL,
+      normalized_data jsonb NOT NULL,
+      source_updated_at timestamptz NULL,
+      fetched_at timestamptz NOT NULL DEFAULT now(),
+      created_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at()
+    );
+    CREATE INDEX idx_weather_snapshots_location_fetched
+      ON weather_snapshots(location_code, fetched_at DESC);
+
+    CREATE TABLE weather_slots (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      weather_snapshot_id uuid NOT NULL REFERENCES weather_snapshots(id) ON DELETE CASCADE,
+      location_code text NOT NULL REFERENCES locations(code),
+       local_datetime timestamptz NOT NULL,
+       weather_desc text NOT NULL,
+      hazard_score smallint NOT NULL,
+      raw_fields jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at()
+    );
+    CREATE INDEX idx_weather_slots_location_datetime
+      ON weather_slots(location_code, local_datetime);
+
+    CREATE TABLE activities (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      activity_profile_code text NOT NULL,
+      name_id text NOT NULL,
+      name_en text NOT NULL,
+      active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE analysis_requests (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      location_code text NOT NULL REFERENCES locations(code),
+      activity_id uuid NOT NULL REFERENCES activities(id),
+      activity_profile_code text NOT NULL,
+      activity_profile_version integer NOT NULL,
+      scheduled_start timestamptz NOT NULL,
+      scheduled_end timestamptz NOT NULL,
+      operational_impact jsonb NOT NULL,
+      point_lat double precision NULL CHECK (point_lat IS NULL OR (point_lat >= -90 AND point_lat <= 90)),
+      point_lng double precision NULL CHECK (point_lng IS NULL OR (point_lng >= -180 AND point_lng <= 180)),
+      session_key_hash text NULL,
+      locale text NOT NULL DEFAULT 'id' CHECK (locale IN ('id','en')),
+      resolution_level text NULL CHECK (resolution_level IN ('adm4','adm3','adm2','adm1')),
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX idx_analysis_requests_session_created
+      ON analysis_requests(session_key_hash, created_at);
+
+    CREATE TABLE analysis_results (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      analysis_request_id uuid NOT NULL REFERENCES analysis_requests(id),
+      weather_snapshot_id uuid NOT NULL REFERENCES weather_snapshots(id),
+      decision_status text NOT NULL CHECK (decision_status IN
+        ('PROCEED','MOVE_EARLIER','DEFER','ALTERNATIVE_WINDOW','PROCEED_WITH_MITIGATION','NOT_RECOMMENDED')),
+      risk_score smallint NOT NULL CHECK (risk_score BETWEEN 0 AND 100),
+      risk_label text NOT NULL CHECK (risk_label IN ('LOW','MODERATE','HIGH','VERY_HIGH')),
+      confidence text NOT NULL CHECK (confidence IN ('LOW','MEDIUM','HIGH')),
+      scoring_version text NOT NULL,
+      decision_engine_version text NOT NULL,
+      public_token text NOT NULL UNIQUE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at(),
+      deleted_at timestamptz NULL
+    );
+    CREATE UNIQUE INDEX idx_analysis_results_public_token ON analysis_results(public_token);
+    CREATE INDEX idx_analysis_results_request ON analysis_results(analysis_request_id);
+
+    CREATE TABLE decision_reasons (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      analysis_result_id uuid NOT NULL REFERENCES analysis_results(id) ON DELETE CASCADE,
+      code text NOT NULL,
+      severity text NOT NULL CHECK (severity IN ('info','warning','critical')),
+      params jsonb NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX idx_decision_reasons_result ON decision_reasons(analysis_result_id);
+
+    CREATE TABLE evidence (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      decision_reason_id uuid NOT NULL REFERENCES decision_reasons(id) ON DELETE CASCADE,
+      evidence_type text NOT NULL,
+      reference_id uuid NOT NULL,
+      snapshot_data jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX idx_evidence_reason ON evidence(decision_reason_id);
+
+    CREATE TABLE report_snapshots (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      analysis_result_id uuid NOT NULL REFERENCES analysis_results(id),
+      locale text NOT NULL DEFAULT 'id' CHECK (locale IN ('id','en')),
+      report_html text NOT NULL,
+      pdf_url text NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at()
+    );
+    CREATE INDEX idx_report_snapshots_analysis ON report_snapshots(analysis_result_id);
+
+    CREATE TABLE session_boards (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      session_key_hash text NOT NULL,
+      label text NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      last_seen_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at()
+    );
+    CREATE INDEX idx_session_boards_session_key ON session_boards(session_key_hash);
+
+    -- Anti-abuse records are retained for 30 days, intentionally longer than the 7-day default.
+    CREATE TABLE anti_abuse_events (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      request_id uuid NULL,
+      event_type text NOT NULL CHECK (event_type IN
+        ('CHALLENGE_ISSUED','CHALLENGE_PASSED','CHALLENGE_FAILED','RATE_BLOCKED')),
+      risk_score smallint NOT NULL,
+      ip_hash text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at(30)
+    );
+    CREATE INDEX idx_anti_abuse_events_ip_hash_created ON anti_abuse_events(ip_hash, created_at);
+
+    CREATE TABLE translation_catalog (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      code text NOT NULL,
+      locale text NOT NULL CHECK (locale IN ('id','en')),
+      template text NOT NULL,
+      reviewed_by_human boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE(code, locale)
+    );
+
+    CREATE TABLE system_events (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      trace_id text NULL,
+      event_type text NOT NULL,
+      payload jsonb NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at()
+    );
+    CREATE INDEX idx_system_events_trace_id ON system_events(trace_id);
+    CREATE INDEX idx_system_events_created ON system_events(created_at);
+
+    CREATE TRIGGER locations_updated_at BEFORE UPDATE ON locations
+      FOR EACH ROW EXECUTE FUNCTION weatherops_touch_updated_at();
+    CREATE TRIGGER translation_catalog_updated_at BEFORE UPDATE ON translation_catalog
+      FOR EACH ROW EXECUTE FUNCTION weatherops_touch_updated_at();
+  ;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0002_core-schema', NOW());
+
+
+### MIGRATION 0003_weather_nullable_source_fields (UP) ###
+
+    ALTER TABLE weather_slots
+      ALTER COLUMN local_datetime DROP NOT NULL,
+      ALTER COLUMN weather_desc DROP NOT NULL;
+  ;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0003_weather_nullable_source_fields', NOW());
+
+
+### MIGRATION 0004_weather-source-registry (UP) ###
+
+    CREATE TABLE weather_sources (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      code text NOT NULL UNIQUE,
+      provider_type text NOT NULL CHECK (provider_type IN ('domestic','international')),
+      display_name text NOT NULL,
+      adapter_key text NOT NULL,
+      base_url text NULL,
+      config jsonb NOT NULL DEFAULT '{}',
+      enabled boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE weather_api_responses (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      source_code text NOT NULL REFERENCES weather_sources(code),
+      location_code text NULL,
+      request_url text NULL,
+      request_params jsonb NOT NULL DEFAULT '{}',
+      http_status integer NULL CHECK (http_status IS NULL OR (http_status BETWEEN 100 AND 599)),
+      response_body jsonb NULL,
+      response_text text NULL,
+      success boolean NOT NULL,
+      error_code text NULL,
+      error_message text NULL,
+      duration_ms integer NULL CHECK (duration_ms IS NULL OR duration_ms >= 0),
+      fetched_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL DEFAULT weatherops_expires_at()
+    );
+    CREATE INDEX idx_weather_api_responses_source_fetched
+      ON weather_api_responses(source_code, fetched_at DESC);
+    CREATE INDEX idx_weather_api_responses_location_fetched
+      ON weather_api_responses(location_code, fetched_at DESC);
+
+    CREATE TRIGGER weather_sources_updated_at BEFORE UPDATE ON weather_sources
+      FOR EACH ROW EXECUTE FUNCTION weatherops_touch_updated_at();
+
+    INSERT INTO weather_sources (code, provider_type, display_name, adapter_key, base_url)
+    VALUES ('BMKG', 'domestic', 'Badan Meteorologi, Klimatologi, dan Geofisika', 'bmkg', NULL)
+    ON CONFLICT (code) DO NOTHING;
+  ;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0004_weather-source-registry', NOW());
+
+
+### MIGRATION 0005_permanent_reference_seed (UP) ###
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_profile_unique
+      ON activities(activity_profile_code);
+
+    INSERT INTO activity_profiles (code, version, name_id, name_en, hazard_sensitivity)
+    VALUES ('CONCRETE_POUR', 1, 'Pengecoran Beton', 'Concrete Pour', '{}')
+    ON CONFLICT (code, version) DO UPDATE SET
+      name_id = EXCLUDED.name_id,
+      name_en = EXCLUDED.name_en,
+      hazard_sensitivity = EXCLUDED.hazard_sensitivity,
+      active = true;
+
+    INSERT INTO activities (activity_profile_code, name_id, name_en)
+    VALUES ('CONCRETE_POUR', 'Pengecoran Beton', 'Concrete Pour')
+    ON CONFLICT (activity_profile_code) DO UPDATE SET
+      name_id = EXCLUDED.name_id,
+      name_en = EXCLUDED.name_en,
+      active = true;
+  ;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0005_permanent_reference_seed', NOW());
+
+
+### MIGRATION 0006_permanent_api_history (UP) ###
+
+    ALTER TABLE weather_api_responses
+      ALTER COLUMN expires_at DROP NOT NULL,
+      ALTER COLUMN expires_at DROP DEFAULT;
+    UPDATE weather_api_responses SET expires_at = NULL;
+  ;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0006_permanent_api_history', NOW());
+
+
+### MIGRATION 0007_translation-catalog (UP) ###
+
+    INSERT INTO translation_catalog (code, locale, template, reviewed_by_human) VALUES
+      ('HEAVY_RAIN_CRITICAL_SLOT', 'id', 'Hujan lebat berada dalam waktu kerja.', false),
+      ('HEAVY_RAIN_CRITICAL_SLOT', 'en', 'Heavy rain falls within the work window.', false),
+      ('UNKNOWN_WEATHER_LOW_CONFIDENCE', 'id', 'Data cuaca tidak dikenal menurunkan tingkat keyakinan.', false),
+      ('UNKNOWN_WEATHER_LOW_CONFIDENCE', 'en', 'Unknown weather data lowers confidence.', false),
+      ('INCOMPLETE_SLOT_COVERAGE', 'id', 'Cakupan slot prakiraan tidak lengkap.', false),
+      ('INCOMPLETE_SLOT_COVERAGE', 'en', 'Forecast slot coverage is incomplete.', false),
+      ('CRITICAL_WINDOW_RAIN_RISK', 'id', 'Terdapat risiko hujan pada jendela kritis.', false),
+      ('CRITICAL_WINDOW_RAIN_RISK', 'en', 'There is rain risk during the critical window.', false),
+      ('CLEAR_CONDITIONS_PROCEED', 'id', 'Kondisi cuaca mendukung pelaksanaan.', false),
+      ('CLEAR_CONDITIONS_PROCEED', 'en', 'Weather conditions support proceeding.', false),
+      ('ALTERNATIVE_WINDOW_AVAILABLE', 'id', 'Tersedia jendela waktu alternatif.', false),
+      ('ALTERNATIVE_WINDOW_AVAILABLE', 'en', 'An alternative time window is available.', false),
+      ('status.PROCEED', 'id', 'Lanjutkan sesuai jadwal', false),
+      ('status.PROCEED', 'en', 'Proceed as scheduled', false),
+      ('status.MOVE_EARLIER', 'id', 'Majukan jadwal', false),
+      ('status.MOVE_EARLIER', 'en', 'Move the activity earlier', false),
+      ('status.DEFER', 'id', 'Tunda pelaksanaan', false),
+      ('status.DEFER', 'en', 'Defer the activity', false),
+      ('status.ALTERNATIVE_WINDOW', 'id', 'Gunakan waktu alternatif', false),
+      ('status.ALTERNATIVE_WINDOW', 'en', 'Use an alternative time window', false),
+      ('status.PROCEED_WITH_MITIGATION', 'id', 'Lanjutkan dengan langkah mitigasi', false),
+      ('status.PROCEED_WITH_MITIGATION', 'en', 'Proceed with mitigation measures', false),
+      ('status.NOT_RECOMMENDED', 'id', 'Tidak direkomendasikan untuk dilaksanakan', false),
+      ('status.NOT_RECOMMENDED', 'en', 'Not recommended for execution', false),
+      ('risk.LOW', 'id', 'Rendah', false), ('risk.LOW', 'en', 'Low', false),
+      ('risk.MODERATE', 'id', 'Sedang', false), ('risk.MODERATE', 'en', 'Moderate', false),
+      ('risk.HIGH', 'id', 'Tinggi', false), ('risk.HIGH', 'en', 'High', false),
+      ('risk.VERY_HIGH', 'id', 'Sangat tinggi', false), ('risk.VERY_HIGH', 'en', 'Very high', false),
+      ('confidence.LOW', 'id', 'Rendah', false), ('confidence.LOW', 'en', 'Low', false),
+      ('confidence.MEDIUM', 'id', 'Sedang', false), ('confidence.MEDIUM', 'en', 'Medium', false),
+      ('confidence.HIGH', 'id', 'Tinggi', false), ('confidence.HIGH', 'en', 'High', false),
+      ('severity.info', 'id', 'informasi', false), ('severity.info', 'en', 'information', false),
+      ('severity.warning', 'id', 'peringatan', false), ('severity.warning', 'en', 'warning', false),
+      ('severity.critical', 'id', 'kritis', false), ('severity.critical', 'en', 'critical', false),
+      ('label.risk_score', 'id', 'Skor risiko (0–100)', false), ('label.risk_score', 'en', 'Risk score (0–100)', false),
+      ('label.risk_label', 'id', 'Tingkat risiko', false), ('label.risk_label', 'en', 'Risk level', false),
+      ('label.confidence', 'id', 'Tingkat keyakinan prakiraan', false), ('label.confidence', 'en', 'Forecast confidence', false),
+      ('label.analysis_time', 'id', 'Waktu analisis', false), ('label.analysis_time', 'en', 'Analysis time', false),
+      ('label.decision', 'id', 'Keputusan', false), ('label.decision', 'en', 'Decision', false),
+      ('label.reasons', 'id', 'Alasan', false), ('label.reasons', 'en', 'Reasons', false),
+      ('label.no_reasons', 'id', 'Tidak ada alasan tambahan.', false), ('label.no_reasons', 'en', 'No additional reasons.', false),
+      ('label.weather_report', 'id', 'Laporan Operasional Cuaca WeatherOps', false), ('label.weather_report', 'en', 'WeatherOps Operational Weather Report', false),
+      ('label.disclaimer', 'id', 'Laporan ini adalah bantuan pengambilan keputusan operasional berdasarkan data prakiraan yang tersedia. Laporan ini bukan jaminan kondisi cuaca dan tidak menggantikan penilaian keselamatan di lapangan.', false),
+      ('label.disclaimer', 'en', 'This report supports operational decision-making based on the available forecast data. It is not a guarantee of weather conditions and does not replace on-site safety judgment.', false)
+    ON CONFLICT (code, locale) DO UPDATE SET template = EXCLUDED.template;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_report_snapshots_analysis_locale
+      ON report_snapshots(analysis_result_id, locale);
+  ;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0007_translation-catalog', NOW());
+
+
+### MIGRATION 0008_session-board-unique (UP) ###
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_boards_session_key_unique ON session_boards(session_key_hash);
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0008_session-board-unique', NOW());
+
+
+### MIGRATION 0009_session-board-translation (UP) ###
+INSERT INTO translation_catalog (code, locale, template, reviewed_by_human) VALUES
+    ('SESSION_BOARD_SUMMARY_HIGH_RISK','id','{highRisk} dari {total} proyek Anda berisiko tinggi minggu ini',false),
+    ('SESSION_BOARD_SUMMARY_HIGH_RISK','en','{highRisk} of your {total} projects are high risk this week',false)
+    ON CONFLICT (code, locale) DO UPDATE SET template = EXCLUDED.template;
+INSERT INTO "public"."pgmigrations" (name, run_on) VALUES ('0009_session-board-translation', NOW());
+
+
+Migrations complete!
+
+> weatherops@0.1.0 seed:dev
+> tsx scripts/seed-dev.ts
+
+/home/runner/workspace/src/app/config/env.ts:42
+    throw new Error(`Invalid environment configuration: ${message}`);
+          ^
+
+
+Error: Invalid environment configuration: SESSION_KEY_SALT: Too small: expected string to have >=16 characters
+    at loadEnv (/home/runner/workspace/src/app/config/env.ts:42:11)
+    at <anonymous> (/home/runner/workspace/src/app/config/env.ts:47:20)
+    at ModuleJob.run (node:internal/modules/esm/module_job:365:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:665:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:99:5)
+
+Node.js v24.3.0
+
+> weatherops@0.1.0 dev
+> npm run build:frontend && tsx src/server.ts
+
+
+> weatherops@0.1.0 build:frontend
+> vite build
+
+vite v8.2.2 building client environment for production...
+✓ 50 modules transformed.
+computing gzip size...
+dist/frontend/index.html                        0.43 kB │ gzip:   0.30 kB
+dist/frontend/assets/index-CBdXJi7E.css       100.05 kB │ gzip:  15.04 kB
+dist/frontend/assets/index-BxZsgjxX.js        239.38 kB │ gzip:  75.25 kB
+dist/frontend/assets/maplibre-gl-_kTaVTrJ.js  986.39 kB │ gzip: 255.43 kB
+
+✓ built in 473ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+/home/runner/workspace/src/app/config/env.ts:42
+    throw new Error(`Invalid environment configuration: ${message}`);
+          ^
+
+
+Error: Invalid environment configuration: SESSION_KEY_SALT: Too small: expected string to have >=16 characters
+    at loadEnv (/home/runner/workspace/src/app/config/env.ts:42:11)
+    at <anonymous> (/home/runner/workspace/src/app/config/env.ts:47:20)
+    at ModuleJob.run (node:internal/modules/esm/module_job:365:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:665:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:99:5)
+
+Node.js v24.3.0
+~/workspace$ 
