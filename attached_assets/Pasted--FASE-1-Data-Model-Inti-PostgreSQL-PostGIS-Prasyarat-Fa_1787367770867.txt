@@ -1,0 +1,326 @@
+# FASE 1 — Data Model Inti (PostgreSQL + PostGIS)
+
+**Prasyarat:** Fase 0 selesai (scaffold jalan, PostGIS aktif, migration tool terpasang).
+**Output fase ini:** Seluruh skema database WeatherOps v3.0 — baseline v2.0 (tidak
+dijabarkan detail di PRD v3.0 karena dianggap sudah solid, jadi kamu harus
+merekonstruksinya dari konteks bagian-bagian lain PRD yang menyebutnya) DIGABUNG
+dengan tambahan v3.0 (§11a) secara utuh. Tidak ada logika bisnis di fase ini —
+hanya schema, migration, constraint, index, dan repository layer CRUD dasar.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 1 dari 11 fase pembangunan WeatherOps. Kamu HANYA mengerjakan data model —
+JANGAN implementasikan decision engine, BMKG fetch, atau endpoint API fungsional di
+luar CRUD dasar untuk verifikasi schema. Gunakan struktur folder dan tooling migrasi
+yang sudah dibuat di Fase 0 — jangan buat ulang atau ganti tool migrasi.
+
+## Prinsip wajib sebelum menulis satu baris SQL
+1. Semua tabel memakai `id` UUID v4 sebagai primary key (`gen_random_uuid()` via
+   ekstensi `pgcrypto`, aktifkan sebagai migration terpisah jika belum ada).
+2. Semua tabel punya `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`. Tabel yang
+   datanya bisa berubah (bukan immutable log) juga punya
+   `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()` dengan trigger auto-update.
+3. Tabel yang menyimpan hasil analisis/laporan bersifat IMMUTABLE setelah dibuat —
+   jangan buatkan `updated_at` atau UPDATE query untuk tabel-tabel ini, hanya
+   INSERT dan (untuk beberapa) soft-delete via `deleted_at`. Tabel yang termasuk
+   kategori ini: analysis_results, weather_snapshots, evidence, reports/report_snapshots.
+4. Retention 7 hari adalah DEFAULT sistem, bukan hardcode — setiap tabel yang
+   punya retention harus punya kolom `expires_at TIMESTAMPTZ`, dihitung saat insert
+   sebagai `created_at + interval '7 days'` (configurable lewat env, jangan hardcode
+   angka 7 di banyak tempat — sentralisasi di satu constant/config).
+5. Public token (dipakai untuk akses anonim tanpa login) harus unguessable dan
+   non-sequential: generate sebagai random string base62 minimal 32 karakter
+   (BUKAN UUID biasa untuk field ini, karena UUID v4 masih punya struktur yang
+   bisa dikenali; gunakan crypto.randomBytes). Simpan sebagai `public_token TEXT
+   UNIQUE NOT NULL`, index unique.
+
+## TABEL YANG WAJIB DIBUAT
+
+### 1. `locations` (kode wilayah administratif berjenjang adm1-adm4, DIPERLUAS v3.0)
+```sql
+CREATE TABLE locations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT NOT NULL UNIQUE,          -- kode wilayah kanonik (Kemendagri)
+  parent_code TEXT NULL REFERENCES locations(code),
+  level TEXT NOT NULL CHECK (level IN ('adm1','adm2','adm3','adm4')),
+  name TEXT NOT NULL,
+  full_name TEXT NOT NULL,            -- nama lengkap berjenjang, mis. "Kel. X, Kec. Y, Kab. Z, Prov. W"
+  active BOOLEAN NOT NULL DEFAULT true,
+  geometry GEOMETRY(MultiPolygon, 4326) NULL,
+  geometry_simplified GEOMETRY(MultiPolygon, 4326) NULL,
+  boundary_source TEXT NULL,          -- mis. 'kemendagri_2024'
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_locations_parent_code ON locations(parent_code);
+CREATE INDEX idx_locations_level ON locations(level);
+CREATE INDEX idx_locations_geometry ON locations USING GIST(geometry);
+CREATE INDEX idx_locations_geometry_simplified ON locations USING GIST(geometry_simplified);
+```
+
+### 2. `activity_profiles` (versioned — konstruksi, dengan pengecoran sebagai profil terkuat)
+```sql
+CREATE TABLE activity_profiles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT NOT NULL,                 -- mis. 'CONCRETE_POUR'
+  version INTEGER NOT NULL,
+  name_id TEXT NOT NULL,              -- nama tampilan sementara (akan dimigrasi ke translation catalog Fase 5)
+  name_en TEXT NOT NULL,
+  hazard_sensitivity JSONB NOT NULL,  -- mapping hazard -> bobot sensitivitas, definisi detail di Fase 3
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(code, version)
+);
+```
+Catatan: struktur JSONB `hazard_sensitivity` JANGAN diisi datanya sekarang — itu
+tugas Fase 3 (Decision Engine). Fase ini hanya menyiapkan kolomnya.
+
+### 3. `weather_snapshots` (immutable log hasil fetch BMKG mentah + ternormalisasi)
+```sql
+CREATE TABLE weather_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  location_code TEXT NOT NULL REFERENCES locations(code),
+  source TEXT NOT NULL DEFAULT 'BMKG',
+  raw_response JSONB NOT NULL,        -- payload mentah BMKG, untuk audit (§13a.2)
+  normalized_data JSONB NOT NULL,     -- hasil normalisasi §16, diisi Fase 2
+  source_updated_at TIMESTAMPTZ NULL, -- timestamp dari BMKG sendiri
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_weather_snapshots_location_fetched ON weather_snapshots(location_code, fetched_at DESC);
+```
+
+### 4. `weather_slots` (slot waktu individual hasil pecahan snapshot, dipakai untuk trend/heatmap §42a.2, §42b.4)
+```sql
+CREATE TABLE weather_slots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  weather_snapshot_id UUID NOT NULL REFERENCES weather_snapshots(id) ON DELETE CASCADE,
+  location_code TEXT NOT NULL REFERENCES locations(code),
+  local_datetime TIMESTAMPTZ NOT NULL,
+  weather_desc TEXT NOT NULL,         -- nilai mentah dari BMKG, divalidasi Fase 2 (§13a.1 poin 4)
+  hazard_score SMALLINT NOT NULL,     -- dihitung Fase 3
+  raw_fields JSONB NOT NULL,          -- field cuaca lain (suhu, kelembapan, angin, dll)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_weather_slots_location_datetime ON weather_slots(location_code, local_datetime);
+```
+
+### 5. `activities` — daftar aktivitas yang bisa dipilih user (referensi ke activity_profiles aktif)
+```sql
+CREATE TABLE activities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  activity_profile_code TEXT NOT NULL,
+  name_id TEXT NOT NULL,
+  name_en TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### 6. `analysis_requests` (input user, DIPERLUAS v3.0 — §11a.2)
+```sql
+CREATE TABLE analysis_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  location_code TEXT NOT NULL REFERENCES locations(code),
+  activity_id UUID NOT NULL REFERENCES activities(id),
+  activity_profile_code TEXT NOT NULL,
+  activity_profile_version INTEGER NOT NULL,
+  scheduled_start TIMESTAMPTZ NOT NULL,
+  scheduled_end TIMESTAMPTZ NOT NULL,
+  operational_impact JSONB NOT NULL,   -- input dampak operasional dari wizard
+  point_lat DOUBLE PRECISION NULL,
+  point_lng DOUBLE PRECISION NULL,
+  session_key_hash TEXT NULL,
+  locale TEXT NOT NULL DEFAULT 'id' CHECK (locale IN ('id','en')),
+  resolution_level TEXT NULL CHECK (resolution_level IN ('adm4','adm3','adm2','adm1')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT chk_point_lat CHECK (point_lat IS NULL OR (point_lat >= -90 AND point_lat <= 90)),
+  CONSTRAINT chk_point_lng CHECK (point_lng IS NULL OR (point_lng >= -180 AND point_lng <= 180))
+);
+CREATE INDEX idx_analysis_requests_session_created ON analysis_requests(session_key_hash, created_at);
+```
+
+### 7. `analysis_results` (immutable, hasil decision engine — §75 purity, JANGAN diupdate)
+```sql
+CREATE TABLE analysis_results (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  analysis_request_id UUID NOT NULL REFERENCES analysis_requests(id),
+  weather_snapshot_id UUID NOT NULL REFERENCES weather_snapshots(id),
+  decision_status TEXT NOT NULL CHECK (decision_status IN
+      ('PROCEED','MOVE_EARLIER','DEFER','ALTERNATIVE_WINDOW','PROCEED_WITH_MITIGATION','NOT_RECOMMENDED')),
+  risk_score SMALLINT NOT NULL CHECK (risk_score BETWEEN 0 AND 100),
+  risk_label TEXT NOT NULL CHECK (risk_label IN ('LOW','MODERATE','HIGH','VERY_HIGH')),
+  confidence TEXT NOT NULL CHECK (confidence IN ('LOW','MEDIUM','HIGH')),
+  scoring_version TEXT NOT NULL,
+  decision_engine_version TEXT NOT NULL,
+  public_token TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  deleted_at TIMESTAMPTZ NULL        -- soft delete, dipakai endpoint DELETE §64a.5
+);
+CREATE UNIQUE INDEX idx_analysis_results_public_token ON analysis_results(public_token);
+CREATE INDEX idx_analysis_results_request ON analysis_results(analysis_request_id);
+```
+
+### 8. `decision_reasons` (kode alasan terstruktur, bahasa-netral — §27, §27a)
+```sql
+CREATE TABLE decision_reasons (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  analysis_result_id UUID NOT NULL REFERENCES analysis_results(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,                 -- mis. 'HEAVY_RAIN_CRITICAL_SLOT'
+  severity TEXT NOT NULL CHECK (severity IN ('info','warning','critical')),
+  params JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_decision_reasons_result ON decision_reasons(analysis_result_id);
+```
+
+### 9. `evidence` (jejak bukti yang mendukung setiap alasan — §28, §50, §51)
+```sql
+CREATE TABLE evidence (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  decision_reason_id UUID NOT NULL REFERENCES decision_reasons(id) ON DELETE CASCADE,
+  evidence_type TEXT NOT NULL,        -- mis. 'weather_slot'
+  reference_id UUID NOT NULL,         -- FK longgar ke weather_slots.id dsb (polymorphic, tanpa FK constraint DB)
+  snapshot_data JSONB NOT NULL,       -- salinan data pada saat evaluasi, untuk auditability walau sumber berubah
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_evidence_reason ON evidence(decision_reason_id);
+```
+
+### 10. `report_snapshots` (immutable, hasil render laporan — §29, §30, §72, DIPERLUAS §42d.4)
+```sql
+CREATE TABLE report_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  analysis_result_id UUID NOT NULL REFERENCES analysis_results(id),
+  locale TEXT NOT NULL DEFAULT 'id' CHECK (locale IN ('id','en')),
+  report_html TEXT NOT NULL,
+  pdf_url TEXT NULL,                  -- lokasi file PDF setelah digenerate, nullable sampai digenerate
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_report_snapshots_analysis ON report_snapshots(analysis_result_id);
+```
+
+### 11. `session_boards` (§11a.3)
+```sql
+CREATE TABLE session_boards (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_key_hash TEXT NOT NULL,
+  label TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_session_boards_session_key ON session_boards(session_key_hash);
+```
+
+### 12. `anti_abuse_events` (§11a.4)
+```sql
+CREATE TABLE anti_abuse_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id UUID NULL,
+  event_type TEXT NOT NULL CHECK (event_type IN
+      ('CHALLENGE_ISSUED','CHALLENGE_PASSED','CHALLENGE_FAILED','RATE_BLOCKED')),
+  risk_score SMALLINT NOT NULL,
+  ip_hash TEXT NOT NULL,              -- SELALU hash bergaram, TIDAK PERNAH IP mentah — enforce di kode, bukan hanya konvensi
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_anti_abuse_events_ip_hash_created ON anti_abuse_events(ip_hash, created_at);
+```
+Retention tabel ini 30 hari (BERBEDA dari default 7 hari tabel lain) — dokumentasikan
+perbedaan ini eksplisit di komentar SQL dan di README module anti-abuse.
+
+### 13. `translation_catalog` (opsional sesuai §27a, tapi buat SEKARANG agar Fase 5 tidak perlu migration lagi)
+```sql
+CREATE TABLE translation_catalog (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT NOT NULL,                 -- mis. 'HEAVY_RAIN_CRITICAL_SLOT'
+  locale TEXT NOT NULL CHECK (locale IN ('id','en')),
+  template TEXT NOT NULL,             -- mis. "Hujan lebat berada di dalam waktu kerja pada pukul {slot_time}."
+  reviewed_by_human BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(code, locale)
+);
+```
+
+### 14. `system_events` (log event sistem untuk observability, disebut di §39a.1)
+```sql
+CREATE TABLE system_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_id TEXT NULL,                 -- diisi mulai Fase 9, nullable sekarang
+  event_type TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_system_events_trace_id ON system_events(trace_id);
+CREATE INDEX idx_system_events_created ON system_events(created_at);
+```
+
+## Constraint tambahan wajib (§11a.5) — pastikan SEMUA ini benar-benar ada di migration, bukan hanya di komentar:
+- `analysis_requests.point_lat` dalam rentang [-90, 90] jika diisi — SUDAH tertulis di atas, verifikasi CHECK constraint benar-benar jalan (test insert nilai invalid harus gagal).
+- `analysis_requests.point_lng` dalam rentang [-180, 180] jika diisi.
+- `analysis_requests.locale` harus 'id' atau 'en'.
+- `analysis_requests.resolution_level` harus salah satu dari 'adm4','adm3','adm2','adm1' jika diisi.
+
+## Repository layer (CRUD dasar, BUKAN business logic)
+Untuk SETIAP tabel di atas, buat repository di module yang sesuai
+(`src/modules/<module>/<module>.repository.ts`) dengan method dasar SAJA:
+  - `findById(id)`
+  - `create(data)`
+  - `findMany(filter)` (untuk tabel yang butuh, mis. locations by parent_code)
+Pemetaan tabel -> module:
+  locations -> modules/locations
+  activity_profiles, activities -> modules/activities
+  weather_snapshots, weather_slots -> modules/weather
+  analysis_requests, analysis_results, decision_reasons, evidence -> modules/analysis
+  report_snapshots -> modules/reports
+  session_boards -> modules/session-board
+  anti_abuse_events -> modules/anti-abuse
+  translation_catalog -> modules/i18n
+  system_events -> modules/system
+
+JANGAN tulis service atau controller yang memanggil repository ini dengan logika
+bisnis nyata — itu tugas fase-fase berikutnya. Repository ini HANYA dipakai untuk
+test verifikasi schema di fase ini.
+
+## Testing wajib
+1. Test migration: `up` lalu `down` lalu `up` lagi tanpa error untuk SEMUA migration.
+2. Test setiap CHECK constraint dengan mencoba insert data invalid dan pastikan
+   query gagal (expect error, bukan expect success).
+3. Test bahwa `locations.geometry` bisa diisi GeoJSON polygon valid dan
+   `ST_Contains` bisa dijalankan terhadapnya (test sederhana dengan 1 polygon dummy
+   dan 1 titik di dalam, 1 titik di luar).
+4. Test bahwa `public_token` pada `analysis_results` unique constraint benar-benar
+   menolak duplikat.
+5. Test repository CRUD dasar untuk minimal 3 tabel representatif (locations,
+   analysis_results, session_boards).
+
+## Seed data minimal (untuk keperluan testing fase ini dan fase berikutnya)
+Buat script `scripts/seed-dev.ts` berisi:
+  - 1 provinsi (adm1) -> 1 kabupaten (adm2) -> 1 kecamatan (adm3) -> 2 kelurahan (adm4) dummy,
+    dengan geometry polygon SEDERHANA (kotak kecil, bukan boundary asli — boundary
+    asli diurus Fase 6 §7a.2) supaya point-in-polygon bisa dites.
+  - 1 activity_profile dummy code 'CONCRETE_POUR' version 1 (hazard_sensitivity
+    boleh objek kosong `{}` untuk sekarang).
+  - 1 activity dummy terkait profile tsb.
+JANGAN seed data analysis_requests/analysis_results dummy — itu hasil end-to-end
+flow yang belum ada sampai Fase 4.
+
+## Definition of Done
+- [ ] Semua 14 tabel di atas ada dengan constraint dan index persis seperti spesifikasi.
+- [ ] `postgis` dan `pgcrypto` extension aktif dan diverifikasi.
+- [ ] Semua test migration up/down/up lulus.
+- [ ] Semua test constraint (termasuk yang HARUS gagal) lulus.
+- [ ] Test PostGIS point-in-polygon dasar lulus dengan bukti query aktual ditampilkan.
+- [ ] Seed script jalan tanpa error dan bisa dijalankan berulang (idempotent atau
+      truncate-first).
+- [ ] `npm run typecheck` bersih.
+- [ ] TIDAK ADA service/controller dengan logika bisnis ditulis di fase ini.
+
+Laporkan: daftar tabel final, hasil test, dan contoh query PostGIS yang berhasil
+dijalankan terhadap seed data. Jangan lanjut ke Fase 2 tanpa instruksi eksplisit.
+```

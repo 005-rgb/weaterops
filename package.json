@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "db:migrate": "node-pg-migrate -m src/infrastructure/database/migrations up",
+    "seed:dev": "tsx scripts/seed-dev.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src tests eslint.config.js vitest.config.ts",

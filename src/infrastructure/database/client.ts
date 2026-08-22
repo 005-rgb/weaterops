@@ -6,6 +6,7 @@ const { Pool } = pg;
 
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
+  options: `-c weatherops.retention_days=${env.RETENTION_DAYS}`,
 });
 
 export async function getPostgisVersion(): Promise<string> {

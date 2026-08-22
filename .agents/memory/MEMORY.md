@@ -1,0 +1,1 @@
+- [Migration CLI usage](migration-cli-usage.md) — use node-pg-migrate directly for down/redo because the db:migrate npm script fixes the action to up.
