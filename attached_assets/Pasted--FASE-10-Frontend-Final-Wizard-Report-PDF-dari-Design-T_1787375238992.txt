@@ -1,0 +1,185 @@
+# FASE 10 — Frontend Final (Wizard, Report, PDF dari Design Token)
+
+**Prasyarat KHUSUS — BERBEDA dari fase lain:** Fase ini TIDAK BOLEH dimulai
+sampai deliverable non-kode berikut SUDAH ADA dan disetujui product owner
+(§42c.2 exit criteria eksplisit menyatakan ini):
+1. Low-fidelity wireframe untuk SEMUA layar wizard (§42c.1.1).
+2. Design token specification versioned (warna, tipografi, spacing, breakpoint,
+   kontras AA minimum) sebagai JSON/CSS variables (§42c.1.2).
+3. High-fidelity mockup untuk layar kritis (§42c.1.3).
+4. Interactive prototype + usability test ≥5 partisipan (§42c.1.4) — idealnya
+   selesai sebelum fase ini, tapi PRD mengizinkan poin 3-4 selesai sebelum §82
+   (production complete), bukan mutlak sebelum sprint dimulai seperti poin 1-2.
+
+**JANGAN delegasikan pembuatan wireframe/design token ke Replit AI sebagai
+pengganti proses desain manusia** — agent BOLEH membantu men-generate draft
+awal token/wireframe sebagai TITIK MULAI diskusi desain, tapi persetujuan akhir
+tetap keputusan manusia (product owner + designer) sebelum prompt fase ini
+dijalankan penuh. Prompt di bawah mengasumsikan token & wireframe SUDAH final.
+
+**Prasyarat teknis:** Fase 5 (i18n), Fase 6 (geospasial + peta), Fase 7 (session
+board) selesai.
+**Output fase ini:** UI produksi lengkap — wizard input, report (desktop+mobile),
+PDF final dengan styling dari design token, terintegrasi penuh dengan seluruh
+backend dari fase 1-9.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 10 dari 11 fase pembangunan WeatherOps. Kamu membangun UI PRODUKSI FINAL.
+SEBELUM MULAI, minta user (product owner) melampirkan/menjelaskan: (1) design
+token final (warna, tipografi, spacing, breakpoint, kontras AA), (2) wireframe/
+mockup final untuk setiap layar. JANGAN mengarang palet warna atau tipografi
+sendiri jika token belum diberikan — tanyakan eksplisit sebelum melanjutkan,
+karena membangun UI final tanpa token yang disetujui akan menghasilkan
+inkonsistensi visual yang mahal untuk diperbaiki nanti.
+
+## 1. Design token integration
+- Import design token sebagai CSS custom properties / Tailwind config (pilih
+  sesuai stack styling yang sudah dipakai project — jika belum ada, gunakan
+  Tailwind CSS dan generate `tailwind.config.js` dari token yang diberikan).
+- SEMUA komponen di fase ini WAJIB memakai token ini — JANGAN hardcode hex
+  warna atau ukuran font di komponen manapun, selalu lewat token/variable.
+- Verifikasi kontras warna AA minimum (§44) untuk SEMUA kombinasi
+  teks-di-atas-background yang dipakai — buat checklist/test aksesibilitas
+  (bisa pakai `axe-core` sebagai automated accessibility test di CI).
+
+## 2. Wizard screens (§42) — bangun SESUAI wireframe yang diberikan, urutan:
+
+### Layar Location (§42a.1, integrasi Fase 6)
+- `<LocationPickerMap />` (sudah ada dari Fase 6) sebagai default view,
+  toggle ke dropdown teks bertingkat sebagai alternatif setara.
+- Validasi: user harus memilih lokasi valid sebelum tombol "Lanjut" aktif.
+
+### Layar Activity
+- Daftar activity dari `GET /api/v1/activities` (endpoint ini mungkin belum
+  eksplisit dibuat di fase sebelumnya — jika belum ada, buat sekarang sebagai
+  bagian fase ini: `GET /api/v1/activities` mengembalikan daftar activities aktif
+  dengan nama sesuai locale aktif).
+- Kartu/list pilihan activity dengan ikon (pakai icon set konsisten, mis.
+  lucide-react jika di React), deskripsi singkat per aktivitas dari translation
+  catalog.
+
+### Layar Schedule
+- Date/time picker untuk `scheduledStart` dan `scheduledEnd`, validasi client-side
+  SEBELUM submit (end > start, start bukan masa lalu) — TAPI backend Fase 4 TETAP
+  jadi validator otoritatif, validasi client hanya untuk UX cepat, jangan
+  duplikasi logic yang bisa nyleneh dari backend.
+
+### Layar Operational Impact
+- Form input sesuai struktur `OperationalImpactInput` dari Fase 3 (jumlah crew,
+  nilai pekerjaan, konsekuensi penundaan, dsb — sesuaikan field PERSIS dengan
+  yang didefinisikan Fase 3, jangan menambah field baru yang tidak dipakai
+  decision engine).
+
+### Layar Review
+- Ringkasan semua input sebelum submit, tombol "Analisis" yang memicu
+  `POST /api/v1/analyses` (dengan proof-of-work challenge dari Fase 8 dijalankan
+  otomatis di background sebelum submit, transparan ke user).
+
+### Loading States (§45)
+- Saat menunggu response `POST /analyses` (termasuk kemungkinan proof-of-work
+  komputasi di Web Worker), tampilkan progress state yang jujur — BUKAN spinner
+  generik tanpa konteks. Tampilkan tahapan singkat (mis. "Mengambil data cuaca
+  terkini..." -> "Menghitung risiko...") — teks ini via translation catalog,
+  JANGAN klaim tahapan yang sebenarnya tidak terjadi (mis. jangan bilang
+  "menghitung risiko" kalau sebenarnya masih menunggu BMKG).
+
+### Error states (§46 Failure UX)
+- Untuk SETIAP error code yang sudah didaftarkan sepanjang fase 1-9
+  (`VALIDATION_FAILED`, `LOCATION_NOT_FOUND`, `WEATHER_SOURCE_UNAVAILABLE`,
+  `BMKG_SCHEMA_VALIDATION_FAILED`, `ANTI_ABUSE_CHALLENGE_REQUIRED`,
+  `LOCATION_RESOLUTION_FAILED`, `BOUNDARY_UNAVAILABLE`, dst — kumpulkan
+  SEMUA dari `src/shared/errors/error-codes.ts`), buat pesan UI yang SPESIFIK
+  dan actionable, bukan pesan generik "Terjadi kesalahan" untuk semua kasus.
+  Setiap pesan lewat translation catalog (Fase 5).
+- `WEATHER_SOURCE_UNAVAILABLE` HARUS punya tombol "Coba lagi" yang jelas
+  (§46, ini bukan kegagalan permanen).
+- `ANTI_ABUSE_CHALLENGE_REQUIRED` HARUS otomatis menampilkan widget CAPTCHA
+  (Fase 8) dengan pesan yang tidak menuduh.
+
+## 3. Report screen (desktop + mobile, §29, §66)
+- Render dari `GET /reports/:publicToken` (Fase 4/5) — desain KARTU KEPUTUSAN
+  (Decision Card) sebagai elemen visual utama: status keputusan besar dan jelas
+  (dengan warna sesuai risk_label DAN ikon/bentuk berbeda, konsisten dengan
+  konvensi Mode B peta di Fase 6 — §44 no color-only).
+- Tampilkan: risk score, risk label, confidence, daftar reasons (dengan
+  severity visual berbeda: info/warning/critical), jendela alternatif jika ada
+  (§26), evidence yang bisa di-expand untuk detail (§28, §50 auditability —
+  user power-user bisa lihat bukti mentah di balik tiap alasan).
+- Toggle bahasa ID/EN di header, PERSISTEN (localStorage), TIDAK memicu
+  request `POST /analyses` baru — hanya `GET /reports/:publicToken?lang=..`
+  ulang (§42d.2, sudah didukung backend dari Fase 5).
+- Tombol "Unduh PDF" -> panggil endpoint PDF trigger dari Fase 4, styling PDF
+  HARUS konsisten dengan token yang sama dipakai HTML report (bangun ulang
+  template PDF di fase ini dengan styling final, gantikan placeholder Fase 4).
+- Disclaimer wajib (§65, §42d.3) ditampilkan jelas di report DAN PDF — untuk
+  fase ini pakai teks disclaimer yang SUDAH direview manusia jika tersedia dari
+  Fase 11 paralel; jika belum, TETAP tandai jelas sebagai draft belum final
+  (jangan hapus placeholder Fase 4 sampai ada konfirmasi review selesai).
+
+## 4. Session Board screen (§42b, integrasi Fase 7)
+- Sudah dibangun kerangkanya di Fase 7 — fase ini hanya MEMPERHALUS styling
+  sesuai design token final dan melengkapi filter/kolom yang mungkin masih
+  kasar dari Fase 7.
+
+## 5. Homepage
+- Entry point produk (§1, §5): headline yang menjawab pertanyaan inti produk,
+  CTA langsung ke wizard (TANPA harus scroll banyak/onboarding panjang, §1).
+- Link footer ke: Metodologi (§48), Tentang Data (§49), Kebijakan Privasi
+  (§64a.4) — halaman-halaman ini kontennya mungkin belum final (§48/§49 dari
+  baseline v2.0, §64a.4 dari Fase 11) — buat SEBAGAI HALAMAN yang ada dan bisa
+  diklik, isi dengan draft dari translation catalog, tandai comment TODO jika
+  kontennya belum final dari fase lain.
+
+## 6. Aksesibilitas menyeluruh (§44) — cek ULANG semua layar baru di fase ini
+- Kontras AA minimum di semua teks.
+- Semua interaksi bisa dilakukan via keyboard (tab order logis).
+- Semua gambar/ikon punya alt text bermakna.
+- Form punya label yang terhubung benar (`<label for>` atau `aria-label`).
+- Jalankan `axe-core` automated test terhadap SETIAP layar baru, laporkan hasil
+  (0 violation kritis sebagai syarat lulus).
+
+## 7. Time-to-decision verification (§4.5)
+- Ukur SECARA MANUAL/instrumented: waktu dari user membuka wizard sampai
+  `locationCode` terisi (target ≤20 detik via peta/search).
+- Ukur waktu total wizard dari awal sampai submit (target ≤90 detik).
+- Ukur waktu dari report tersedia sampai user bisa memahami inti keputusan
+  (target ≤60 detik — ini lebih ke desain visual Decision Card, verifikasi
+  dengan membaca ulang layout: apakah status+alasan utama terlihat TANPA
+  scroll di viewport standar mobile/desktop).
+- Implementasikan sebagai instrumentasi analytics ringan (timestamp event
+  client-side, TIDAK mengirim data pribadi apa pun, hanya durasi agregat) jika
+  memungkinkan, atau laporkan hasil pengukuran manual dengan jelas.
+
+## Testing wajib
+1. Test end-to-end (Playwright/Cypress — pilih satu) SATU alur PENUH: buka
+   homepage -> isi wizard lengkap (lokasi via peta) -> submit -> lihat report
+   -> ganti bahasa -> unduh PDF -> lihat session board menampilkan analysis
+   yang baru dibuat.
+2. Test error state untuk MINIMAL 3 skenario error berbeda (simulasi backend
+   mengembalikan error tsb, verifikasi UI menampilkan pesan yang benar dan
+   actionable).
+3. Test aksesibilitas otomatis (axe-core) di setiap layar, 0 violation kritis.
+4. Test bahwa toggle bahasa TIDAK memicu request `POST /analyses` baru (spy/mock
+   network call, assert hanya GET report yang terpanggil ulang).
+5. Test responsive: layar report dan session board di viewport mobile (375px)
+   dan desktop (1440px), pastikan tidak ada elemen terpotong/tidak accessible.
+
+## Definition of Done
+- [ ] Semua layar wizard, report, session board, homepage dibangun sesuai
+      wireframe & design token yang disetujui (bukan tebakan agent).
+- [ ] Semua error code dari fase 1-9 punya UI state yang jelas dan actionable.
+- [ ] PDF final memakai styling konsisten dengan HTML report.
+- [ ] Toggle bahasa tidak memicu recalculation, terbukti dengan test.
+- [ ] Accessibility test (axe-core) lulus 0 violation kritis di semua layar.
+- [ ] End-to-end test alur penuh lulus.
+- [ ] Time-to-decision terukur dan dilaporkan (angka aktual, bukan estimasi).
+- [ ] Tidak ada hardcoded warna/font di luar design token.
+
+Laporkan: hasil end-to-end test, hasil accessibility test per layar, angka
+time-to-decision terukur, dan screenshot/rekaman alur lengkap dari homepage
+sampai report+PDF+board. Jangan lanjut ke Fase 11 tanpa instruksi eksplisit.
+```
