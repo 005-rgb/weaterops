@@ -1,0 +1,73 @@
+Prioritas wajib
+Prioritas	API/service	Fungsi	Status
+1	BMKG Forecast API	Prakiraan cuaca per lokasi: suhu, hujan, angin, kelembapan	Sudah dibuat adapter-nya, tetapi endpoint resmi dan format live masih perlu diverifikasi
+2	BMKG Peta Curah Hujan & Hari Hujan	Data historis/analisis spasial curah hujan dan jumlah hari hujan	Sudah diinjek sebagai WMS
+3	BMKG Peta Potensi Energi Angin	Data spasial potensi angin untuk analisis aktivitas atau energi	Sudah diinjek sebagai WFS/FeatureServer
+4	API/data batas administrasi resmi	Menghubungkan lokasi pengguna dengan kode provinsi/kabupaten/kecamatan/kelurahan BMKG	Belum ada; saat ini database masih memiliki dummy location
+5	Database PostgreSQL + PostGIS aktif	Menyimpan lokasi, snapshot cuaca, layer spasial, dan query geografis	Belum aktif sempurna; workflow masih mencatat PostGIS tidak tersedia
+API penting berikutnya
+1. API batas wilayah dan kode lokasi
+Ini adalah kebutuhan paling penting setelah BMKG karena sistem harus menjawab:
+
+kode lokasi user sama dengan kode lokasi BMKG atau tidak;
+lokasi berada di kecamatan/kelurahan mana;
+koordinat lokasi masuk polygon administrasi mana;
+apakah perlu tabel mapping bmkg_adm4_code ke kode Kemendagri.
+Sumber yang perlu dipertimbangkan:
+
+BIG / Ina-Geoportal;
+Satu Data Indonesia;
+data batas administrasi resmi Kemendagri;
+endpoint geospasial BMKG jika menyediakan kode wilayah yang kompatibel.
+Jangan langsung mengarang mapping kode wilayah. Struktur kode harus dikonfirmasi dulu.
+
+2. API observasi cuaca aktual
+Prakiraan saja belum cukup untuk validasi kondisi lapangan. Sistem idealnya memiliki:
+
+curah hujan aktual;
+suhu aktual;
+kelembapan;
+kecepatan dan arah angin;
+waktu observasi;
+status kualitas atau kelengkapan data.
+API ini dipakai untuk membandingkan:
+
+forecast vs observed weather
+
+dan mengurangi keputusan yang dibuat berdasarkan prakiraan yang meleset.
+
+3. API radar atau citra satelit cuaca
+Berguna untuk mendeteksi hujan yang sedang bergerak menuju lokasi:
+
+radar cuaca;
+citra awan;
+estimasi hujan near-real-time;
+nowcasting 0–3 jam.
+Ini penting untuk aktivitas yang sensitif terhadap hujan seperti konstruksi, event outdoor, perjalanan, dan pekerjaan lapangan.
+
+Namun API ini sebaiknya masuk setelah forecast, observasi, dan database stabil karena biasanya memiliki keterbatasan akses, ukuran data besar, dan kebutuhan cache khusus.
+
+API opsional sesuai fitur produk
+4. Peta dasar dan tile map
+Jika nanti ada frontend peta, diperlukan provider basemap:
+
+OpenStreetMap;
+Esri World Imagery;
+MapTiler;
+Mapbox;
+Google Maps Platform.
+Fungsinya hanya sebagai peta dasar. Layer BMKG tetap digunakan sebagai overlay WMS/WFS. Perlu memperhatikan attribution dan rate limit provider.
+
+5. API elevasi/topografi
+Berguna jika keputusan cuaca dipengaruhi:
+
+ketinggian lokasi;
+kemiringan medan;
+area pegunungan;
+potensi angin atau hujan lokal.
+Contoh sumber yang bisa dikaji:
+
+DEMNAS;
+SRTM;
+OpenTopography.
+Ini belum wajib untuk fase awal.
