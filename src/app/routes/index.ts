@@ -5,6 +5,7 @@ import { systemRouter } from '../../modules/system/system.routes.js';
 import { weatherSourceRouter } from '../../modules/weather/weather-source.routes.js';
 import { analysisRouter } from '../../modules/analysis/analysis.routes.js';
 import { reportsRouter } from '../../modules/reports/reports.routes.js';
+import { sessionBoardRouter } from '../../modules/session-board/session-board.routes.js';
 
 export const apiRouter = Router();
 apiRouter.use('/system', systemRouter);
@@ -13,3 +14,4 @@ apiRouter.use('/locations', locationsRouter);
 apiRouter.use('/weather/sources', weatherSourceRouter);
 apiRouter.use('/analyses', analysisRouter);
 apiRouter.use('/reports', reportsRouter);
+apiRouter.use('/session-boards', sessionBoardRouter);

@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 const envSchema = z.object({
   DATABASE_URL: z.string().trim().min(1, 'DATABASE_URL is required'),
+  SESSION_KEY_SALT: z.string().min(16).default('weatherops-development-salt'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   RETENTION_DAYS: z.coerce.number().int().positive().default(7),

@@ -1,0 +1,182 @@
+# FASE 7 — Session Board (Dashboard Multi-Proyek Anonim)
+
+**Prasyarat:** Fase 4 (endpoint `/analyses` menyimpan `session_key_hash`), Fase 6
+(komponen `<TrackingMap />` Mode B sudah siap menerima data nyata).
+**Output fase ini:** Mekanisme `session_key` client-side lengkap, endpoint board
+CRUD + summary + regional trend, UI dashboard yang mengintegrasikan `<TrackingMap />`
+dengan data nyata.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 7 dari 11 fase pembangunan WeatherOps. Kamu membangun `session-board` —
+dashboard multi-proyek TANPA LOGIN. Prinsip inti (§6): "no login" bukan berarti
+"tidak ada persistence". `session_key` BUKAN identitas login — dia token acak
+sisi-klien yang HANYA dipakai untuk mengelompokkan tampilan, tidak pernah untuk
+profiling.
+
+## 1. Session key di client (frontend)
+- Saat pertama kali user membuka aplikasi (atau saat pertama kali membuat
+  analysis, mana yang lebih masuk akal dari sisi UX — putuskan dan dokumentasikan),
+  generate `session_key` sebagai UUID v4 DI BROWSER (`crypto.randomUUID()`),
+  simpan di `localStorage` (BUKAN cookie, BUKAN sessionStorage yang hilang saat
+  tab ditutup — harus persist antar sesi browser sesuai §6).
+- `session_key` MENTAH tidak pernah dikirim sebagai bagian dari URL/query string
+  (§32a: mencegah kebocoran lewat log). Kirim HANYA via HEADER khusus, mis.
+  `X-Session-Key: <uuid>`, untuk setiap request yang butuh (create analysis,
+  akses endpoint session-board).
+- Jika `localStorage` kosong/dihapus user, generate `session_key` BARU — ini
+  BERARTI user kehilangan akses dashboard lama (as designed, bukan bug, §6:
+  "menghapus localStorage = kehilangan akses dashboard, BUKAN kehilangan data").
+
+## 2. Backend hashing (§6, §11a.2, §32a)
+- Buat middleware `src/app/middleware/session-key.ts`: baca header
+  `X-Session-Key`, HASH dengan algoritma satu arah (SHA-256 + salt dari env
+  `SESSION_KEY_SALT`) SEBELUM disimpan/dipakai query apa pun. `session_key`
+  MENTAH TIDAK PERNAH disimpan di database dalam bentuk apa pun — hanya
+  `session_key_hash`.
+- Set `req.sessionKeyHash` yang dipakai controller/service selanjutnya.
+- Jika header tidak ada, `req.sessionKeyHash` = null (analysis anonymous
+  single-use TETAP didukung tanpa session board, sesuai §6).
+
+## 3. Integrasi ke `POST /analyses` (yang sudah ada dari Fase 4)
+- Jika `req.sessionKeyHash` ada, simpan ke `analysis_requests.session_key_hash`
+  (kolom sudah ada dari Fase 1) — TIDAK perlu row `session_boards` terpisah
+  dibuat otomatis di sini (board dibuat eksplisit lewat endpoint poin 4, atau
+  dianggap implisit ada begitu ada satu analysis dengan session_key_hash yang
+  sama — putuskan pendekatan mana yang lebih sederhana dan dokumentasikan;
+  disarankan: board bersifat IMPLISIT dari kumpulan analysis dengan
+  session_key_hash sama, endpoint `POST /session-boards` di poin 4 HANYA untuk
+  memberi `label` opsional, bukan prasyarat wajib sebelum analysis bisa dikaitkan).
+
+## 4. Endpoint: `POST /api/v1/session-boards`
+- Header `X-Session-Key` wajib.
+- Body opsional: `{ "label": "string" }` (mis. "Proyek Cor Minggu Ini").
+- Buat/update row `session_boards` (upsert berdasarkan `session_key_hash`):
+  update `last_seen_at`, set `label` jika diberikan, hitung ulang `expires_at`
+  (mengikuti retention 7 hari dari `now()`, extend setiap ada aktivitas — ini
+  KEPUTUSAN PRODUK: apakah retention di-extend tiap kali board diakses atau
+  fixed dari pembuatan pertama; ikuti pola yang sama dengan retention analysis
+  individual di §6 — DOKUMENTASIKAN pilihanmu eksplisit karena PRD tidak
+  merinci ini).
+- Response: `{ "sessionKeyHash": "string", "label": "string|null", "expiresAt": "ISO" }`
+  (JANGAN kembalikan session_key mentah balik — client sudah punya, tidak perlu
+  di-echo).
+
+## 5. Endpoint: `GET /api/v1/session-boards/:sessionKeyHash/analyses`
+- Terima `sessionKeyHash` di path — TAPI WAJIB verifikasi bahwa
+  `sessionKeyHash` di path SAMA dengan hash dari header `X-Session-Key` yang
+  dikirim (hash ulang header, bandingkan) — JANGAN percaya path param mentah
+  sebagai otorisasi, karena hash bisa ditebak/dibagikan; ini mencegah orang lain
+  mengakses board hanya dengan menebak hash. Jika tidak cocok -> 403.
+  (Catatan desain: opsi lain yang lebih sederhana adalah TIDAK menaruh
+  sessionKeyHash di path sama sekali dan selalu derive dari header saja,
+  endpoint jadi `GET /api/v1/session-boards/me/analyses` — PILIH pendekatan ini
+  jika menurutmu lebih aman dan lebih sederhana, dokumentasikan keputusanmu;
+  yang penting invariant "hanya pemilik session_key asli yang bisa akses"
+  tidak boleh dilanggar).
+- Kembalikan daftar `analysis_results` (join `analysis_requests`) dengan
+  `session_key_hash` yang cocok, TIDAK termasuk yang `deleted_at IS NOT NULL`
+  atau `expires_at` sudah lewat.
+- Response per item: `{ analysisId, publicToken, locationName, activityName,
+  scheduledStart, scheduledEnd, decisionStatus, riskLabel, riskScore, confidence,
+  createdAt }`.
+- Dukung query param filter: `?status=DEFER&dateFrom=..&dateTo=..&activity=..`
+  (§42b.2 filter: status keputusan, rentang tanggal, aktivitas).
+
+## 6. Endpoint: `GET /api/v1/session-boards/:sessionKeyHash/summary`
+- Sama pola otorisasi dengan poin 5.
+- Hitung AGREGASI di backend SAAT REQUEST (§42b.3: "dihitung di backend saat
+  request, bukan disimpan sebagai state terpisah yang bisa basi") — JANGAN buat
+  tabel cache summary terpisah yang perlu disinkronkan, cukup `COUNT ... GROUP BY`
+  langsung dari `analysis_results` yang match.
+- Response: `{ totalAnalyses, byDecisionStatus: {...}, byRiskLabel: {...} }`.
+
+## 7. Endpoint: `GET /api/v1/session-boards/:sessionKeyHash/regional-trend`
+- Sama pola otorisasi.
+- Untuk setiap lokasi UNIK yang muncul di analysis dalam board ini, ambil deret
+  waktu `hazard_score` dari `weather_slots` (tabel sudah ada dari Fase 1, diisi
+  Fase 2) untuk snapshot yang RELEVAN dengan analysis-analysis di board tsb
+  (§42b.4) — JANGAN trigger fetch BMKG baru dari endpoint ini, ini PURE READ
+  dari data yang sudah tersimpan mengikuti kebijakan cache §14 (assert eksplisit
+  di test bahwa endpoint ini tidak pernah memanggil `weatherService.getForecastForLocation`
+  atau BMKG client manapun).
+- Response: `{ locationCode, locationName, series: [{ datetime, hazardScore }] }[]`
+
+## 8. Endpoint: `DELETE /api/v1/session-boards/:sessionKeyHash` (opsional tapi
+   masuk akal untuk kelengkapan — user ingin "reset" board)
+- Hapus row `session_boards` untuk hash tsb (board sendiri, BUKAN analysis
+  individualnya — analysis tetap ada dan bisa diakses via `public_token`
+  masing-masing sesuai §6 "menghapus localStorage = kehilangan akses dashboard,
+  bukan kehilangan data").
+
+## 9. URL berbagi board (§42b.5)
+- Frontend: implementasikan cara "membagikan" board via URL dengan
+  `session_key` MENTAH di FRAGMENT (`#`), BUKAN query string —
+  mis. `https://app.example.com/board#sk=<uuid>`. Fragment TIDAK dikirim ke
+  server dalam request HTTP biasa, jadi tidak masuk ke server log (§42b.5).
+- Saat halaman board dibuka dengan fragment `#sk=...`, JavaScript client
+  membaca fragment (bukan server), lalu memanggil API dengan session_key
+  tersebut sebagai header seperti biasa.
+- WAJIB tampilkan peringatan EKSPLISIT ke user sebelum/saat membagikan:
+  "Siapa pun yang membuka tautan ini mendapat akses PENUH ke board Anda" —
+  buat komponen UI khusus untuk ini (modal/banner konfirmasi), jangan hanya
+  taruh di dokumentasi yang tidak dibaca user.
+
+## 10. Integrasi frontend: gabungkan dengan `<TrackingMap />` dari Fase 6
+- Buat halaman/route `/board` yang: fetch `GET /session-boards/:hash/analyses`,
+  `GET /session-boards/:hash/summary`, render `<TrackingMap />` (SEKARANG dengan
+  DATA NYATA, ganti mock dari Fase 6) + tabel board (§42b.2: kolom Lokasi,
+  Aktivitas, Jadwal, Status Keputusan, Risiko, Confidence, Aksi).
+- Summary panel: tampilkan kalimat dinamis seperti "3 dari 5 proyek Anda
+  berisiko tinggi minggu ini" dari hasil endpoint summary — bangun kalimat ini
+  via i18n resolver Fase 5 dengan parameter, JANGAN hardcode teks (tambahkan
+  entri baru ke translation_catalog untuk kode ini, mis.
+  `SESSION_BOARD_SUMMARY_HIGH_RISK`).
+
+## Testing wajib
+1. Test hashing: `session_key` mentah yang sama SELALU menghasilkan
+   `session_key_hash` yang sama (deterministic hash), tapi `session_key` mentah
+   TIDAK PERNAH tersimpan di tabel manapun — query langsung semua kolom tabel
+   terkait dan assert tidak ada yang match format UUID mentah client (hanya
+   hash yang tersimpan).
+2. Test otorisasi: request ke endpoint board dengan `sessionKeyHash` di path
+   yang TIDAK cocok dengan hash dari header `X-Session-Key` -> 403 (atau, jika
+   memilih desain `/me/`, test bahwa tanpa header sama sekali -> 401/403, dan
+   dua session_key berbeda TIDAK BISA saling melihat data masing-masing).
+3. Test bahwa `regional-trend` TIDAK PERNAH memanggil BMKG client (mock/spy
+   assert not called) — murni read dari `weather_slots` tersimpan.
+4. Test summary dihitung real-time dari data terkini (bukan cache basi): buat 2
+   analysis dengan status berbeda, hit summary -> counts benar; buat 1 analysis
+   lagi -> hit summary lagi -> counts ter-update tanpa perlu proses caching
+   manual apa pun.
+5. Test filter pada endpoint analyses (status, date range, activity) mengembalikan
+   subset yang benar.
+6. Test bahwa analysis dengan `expires_at` lewat TIDAK muncul di daftar board.
+7. Frontend: test bahwa fragment URL (`#sk=...`) tidak pernah terkirim ke server
+   sebagai bagian request (inspeksi request yang dibuat, pastikan hanya header
+   yang membawa session_key).
+
+## Definition of Done
+- [ ] `session_key` mentah TIDAK PERNAH tersimpan di database — hanya hash,
+      dibuktikan dengan test eksplisit.
+- [ ] Semua 5+ endpoint session-board berfungsi dengan otorisasi yang benar
+      (session lain tidak bisa akses board yang bukan miliknya).
+- [ ] Summary dan regional-trend dihitung real-time, tidak ada state cache yang
+      bisa basi.
+- [ ] `regional-trend` terbukti tidak pernah memicu fetch BMKG baru.
+- [ ] URL berbagi board memakai fragment, bukan query string, dengan peringatan
+      eksplisit ke user sebelum berbagi.
+- [ ] `<TrackingMap />` dari Fase 6 kini terhubung ke data nyata dari session
+      board, bukan mock lagi.
+- [ ] Board mengikuti retention yang sama/terdokumentasi jelas dengan analysis
+      individual.
+- [ ] `npm run typecheck` bersih, `npm test` lulus semua.
+
+Laporkan: hasil test otorisasi (bukti session A tidak bisa lihat data session B),
+konfirmasi session_key mentah tidak pernah di database, dan screenshot/deskripsi
+halaman board dengan peta + tabel + summary terintegrasi. Jangan lanjut ke
+Fase 8 tanpa instruksi eksplisit.
+```

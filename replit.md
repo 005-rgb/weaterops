@@ -3,7 +3,9 @@
 ## Menjalankan
 
 Environment wajib menyediakan `DATABASE_URL` untuk PostgreSQL dengan PostGIS
-aktif. Node.js 24.x dan npm digunakan oleh proyek ini.
+aktif. Node.js 24.x dan npm digunakan oleh proyek ini. Untuk board anonim,
+`SESSION_KEY_SALT` digunakan untuk hash satu arah `X-Session-Key`; raw UUID
+tidak pernah disimpan.
 
 ```bash
 npm install
@@ -118,3 +120,12 @@ diisi oleh migration `0007_translation-catalog`.
 Terjemahan awal sengaja `reviewed_by_human=false`. Review makna substantif oleh
 penutur asli/profesional bilingual masih harus dijadwalkan terpisah pada Fase 11;
 test hanya memverifikasi kelengkapan struktur dan invariant bahasa-netral.
+
+## Fase 7 — Session Board
+
+Board bersifat implisit: analisis dengan `X-Session-Key` otomatis masuk ke
+kumpulan session tersebut; `POST /api/v1/session-boards` hanya memberi label.
+Akses board memerlukan UUID asli melalui header dan membandingkan hash header
+dengan hash di path. Retensi board diperpanjang tujuh hari setiap aktivitas,
+selaras dengan analisis. `regional-trend` hanya membaca slot cuaca tersimpan
+dan tidak memanggil BMKG.

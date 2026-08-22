@@ -5,7 +5,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles.css';
 
 type Location = { code: string; name: string; fullName: string; level: string };
-type Analysis = { id: string; locationCode: string; locationName: string; riskLabel: 'LOW'|'MODERATE'|'HIGH'|'VERY_HIGH'; decisionStatus: string; timeWindow: string; confidence: string; latitude: number; longitude: number; reportToken?: string };
+type Analysis = { id: string; analysisId?: string; locationCode: string; locationName: string; activityName?: string; riskLabel: 'LOW'|'MODERATE'|'HIGH'|'VERY_HIGH'; decisionStatus: string; timeWindow?: string; scheduledStart?: string; scheduledEnd?: string; confidence: string; riskScore?: number; latitude: number; longitude: number; reportToken?: string; publicToken?: string };
 type Language = 'id' | 'en';
 const ui = {
   en: { platform:'Platform', how:'How it works', trust:'Trust & safety', workspace:'Workspace', signIn:'Sign in', open:'Open workspace', pill:'Weather intelligence for the real world', hero1:'Make every move', hero2:'weather-aware.', heroLead:'WeatherOps turns live weather, location context, and transparent decision logic into one clear operational call.', run:'Run an analysis', explore:'Explore the platform', built:'Built for teams in motion', builtSub:'From field ops to critical planning', for:'ONE SYSTEM FOR', field:'FIELD OPERATIONS', logistics:'LOGISTICS', events:'EVENTS', infrastructure:'INFRASTRUCTURE', agriculture:'AGRICULTURE', way:'01 / THE WEATHEROPS WAY', clarity:'Clarity when', change:'conditions change.', intro:'Most weather data tells you what is happening. WeatherOps helps your team decide what to do next—with evidence you can understand and act on.', see:'See how it works', truth:'One operational truth', truthDesc:'Bring forecasts, hazard context, and local geography into a single decision surface.', receipts:'Decisions with receipts', receiptsDesc:'Every recommendation is traceable to evidence, confidence, and a clear time window.', fieldReady:'Ready for the field', fieldDesc:'Simple outputs for teams that need a confident go, mitigate, defer, or stop.', analysis:'Explore analysis', methodology:'Our methodology', signal:'02 / FROM SIGNAL TO ACTION', calmer:'A calmer way to', move:'move forward.', calmerDesc:'Make operational weather part of your workflow, not another tab your team has to interpret.', set:'Set the context', setDesc:'Choose your exact location, activity, and time window.', read:'Read the conditions', readDesc:'See live hazard signals and local forecast evidence.', call:'Make the call', callDesc:'Share a clear decision with your team.', brief:'DECISION BRIEF', current:'CURRENT', proceed:'PROCEED WITH MITIGATION', conditions:'Conditions are workable. Monitor rainfall intensity before mobilizing.', confidence:'Confidence', sources:'3 evidence sources', op:'03 / YOUR OPERATIONAL WORKSPACE', start:'Start with a', plan:'place and a plan.', startDesc:'Select a location to explore the operational map. WeatherOps keeps the map as input and visualization—the backend remains the authority for every score.', location:'Location selected:', final:'Better decisions', startHere:'start here.', finalDesc:'Bring weather intelligence into the moments that matter.', enter:'Enter the workspace', tagline:'Operational clarity, wherever the weather takes you.' },
@@ -15,7 +15,24 @@ const mapStyle = 'https://tiles.openfreemap.org/styles/liberty'; // Free develop
 const label: Record<string, string> = { LOW: 'Rendah', MODERATE: 'Sedang', HIGH: 'Tinggi', VERY_HIGH: 'Sangat Tinggi' };
 const shape: Record<string, string> = { LOW: '●', MODERATE: '▲', HIGH: '■', VERY_HIGH: '◆!' };
 
-async function api<T>(url: string): Promise<T> { const response = await fetch(url); if (!response.ok) throw new Error((await response.json()).error?.message ?? 'Permintaan gagal'); return response.json(); }
+const sessionKey = () => {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const shared = fragment.get('sk');
+  if (shared && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(shared)) {
+    localStorage.setItem('weatherops-session-key', shared);
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+  }
+  let key = localStorage.getItem('weatherops-session-key');
+  if (!key) { key = crypto.randomUUID(); localStorage.setItem('weatherops-session-key', key); }
+  return key;
+};
+async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers);
+  headers.set('X-Session-Key', sessionKey());
+  const response = await fetch(url, { ...options, headers });
+  if (!response.ok) throw new Error((await response.json()).error?.message ?? 'Permintaan gagal');
+  return response.status === 204 ? (undefined as T) : response.json();
+}
 
 function TextLocationPicker({ onSelect, lang = 'id' }: { onSelect: (location: Location) => void; lang?: Language }) {
   const levels = ['adm1', 'adm2', 'adm3', 'adm4']; const names = ['Provinsi', 'Kabupaten/Kota', 'Kecamatan', 'Desa/Kelurahan'];
@@ -43,6 +60,43 @@ export function TrackingMap({ analyses }: { analyses: Analysis[] }) {
   return <section className="tracking"><div className="tracking-map">{mapFailed ? <p className="map-fallback">Peta gagal dimuat. Data tetap tersedia pada daftar di samping.</p> : <Map initialViewState={{ longitude: 117, latitude: -2, zoom: 4.5 }} mapStyle={mapStyle} onError={() => setMapFailed(true)}><NavigationControl />{heatmap && <Source id="hazard" type="geojson" data={geojson as any}><Layer id="hazard-layer" type="heatmap" paint={{ 'heatmap-weight': ['get', 'hazardScore'], 'heatmap-radius': 30, 'heatmap-opacity': .65 }} /></Source>}{analyses.map((analysis) => <Marker key={analysis.id} longitude={analysis.longitude} latitude={analysis.latitude} anchor="bottom"><button className={`marker risk-${analysis.riskLabel.toLowerCase()}`} aria-label={`${label[analysis.riskLabel]} — ${analysis.locationName}`} onClick={() => setSelected(analysis)}>{shape[analysis.riskLabel]}</button></Marker>)}{selected && <Popup longitude={selected.longitude} latitude={selected.latitude} onClose={() => setSelected(null)} closeOnClick={false}><strong>{label[selected.riskLabel]} — {selected.locationName}</strong><p>{selected.decisionStatus}<br />{selected.timeWindow}<br />Confidence: {selected.confidence}</p>{selected.reportToken && <a href={`/api/v1/reports/${selected.reportToken}`}>Lihat laporan lengkap</a>}</Popup>}</Map>}</div><aside className="tracking-panel"><label className="toggle"><input type="checkbox" checked={heatmap} onChange={(e) => setHeatmap(e.target.checked)} /> Tampilkan heatmap hazard</label><p className="caption">Heatmap = agregasi HAZARD CUACA, bukan skor risiko proyek.</p><h2>Analisis aktif</h2><ul className="analysis-list" aria-label="Daftar analisis aktif">{analyses.map((a) => <li key={a.id}><button onClick={() => setSelected(a)}><span className={`swatch risk-${a.riskLabel.toLowerCase()}`}>{shape[a.riskLabel]}</span><span><strong>{label[a.riskLabel]} — {a.locationName}</strong><small>{a.decisionStatus} · {a.timeWindow} · Confidence {a.confidence}</small></span></button></li>)}</ul></aside></section>;
 }
 
+type BoardSummary = { totalAnalyses: number; byDecisionStatus: Record<string, number>; byRiskLabel: Record<string, number> };
+function BoardPage({ lang }: { lang: Language }) {
+  const [analyses, setAnalyses] = useState<Analysis[]>([]);
+  const [summary, setSummary] = useState<BoardSummary>({ totalAnalyses: 0, byDecisionStatus: {}, byRiskLabel: {} });
+  const [labelValue, setLabelValue] = useState('');
+  const [status, setStatus] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [shareOpen, setShareOpen] = useState(false);
+  const copy = lang === 'id'
+    ? { title: 'Session board', lead: 'Semua analisis Anda, tanpa login.', label: 'Nama board', save: 'Simpan board', total: 'Total proyek', high: 'berisiko tinggi minggu ini', table: 'Analisis tersimpan', location: 'Lokasi', activity: 'Aktivitas', schedule: 'Jadwal', decision: 'Keputusan', risk: 'Risiko', confidence: 'Keyakinan', action: 'Aksi', report: 'Lihat laporan', share: 'Bagikan board', warning: 'Siapa pun yang membuka tautan ini mendapat akses PENUH ke board Anda.', cancel: 'Batal', confirm: 'Buat tautan', empty: 'Belum ada analisis tersimpan.' }
+    : { title: 'Session board', lead: 'All your analyses, without login.', label: 'Board name', save: 'Save board', total: 'Total projects', high: 'are high risk this week', table: 'Saved analyses', location: 'Location', activity: 'Activity', schedule: 'Schedule', decision: 'Decision', risk: 'Risk', confidence: 'Confidence', action: 'Action', report: 'View report', share: 'Share board', warning: 'Anyone who opens this link gets FULL access to your board.', cancel: 'Cancel', confirm: 'Create link', empty: 'No saved analyses yet.' };
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const board = await api<{ sessionKeyHash: string }>('/api/v1/session-boards', { method: 'POST', body: JSON.stringify({}), headers: { 'Content-Type': 'application/json' } });
+      const [rows, totals] = await Promise.all([
+        api<Analysis[]>(`/api/v1/session-boards/${board.sessionKeyHash}/analyses${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+        api<BoardSummary>(`/api/v1/session-boards/${board.sessionKeyHash}/summary`),
+      ]);
+      setAnalyses(rows.map((row) => ({ ...row, id: row.analysisId ?? row.id, timeWindow: `${new Date(row.scheduledStart ?? '').toLocaleString()} – ${new Date(row.scheduledEnd ?? '').toLocaleString()}` })));
+      setSummary(totals);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Gagal memuat board'); }
+    finally { setLoading(false); }
+  }, [status]);
+  useEffect(() => { void load(); }, [load]);
+  const saveLabel = async () => { await api('/api/v1/session-boards', { method: 'POST', body: JSON.stringify({ label: labelValue }), headers: { 'Content-Type': 'application/json' } }); };
+  const shareUrl = `${window.location.origin}/board#sk=${sessionKey()}`;
+  return <main className="board-page">
+    <div className="board-header"><div><div className="section-kicker">WEATHEROPS / WORKSPACE</div><h1>{copy.title}</h1><p>{copy.lead}</p></div><button className="secondary-button board-share" onClick={() => setShareOpen(true)}>↗ {copy.share}</button></div>
+    <div className="board-controls"><input aria-label={copy.label} value={labelValue} onChange={(e) => setLabelValue(e.target.value)} placeholder={copy.label} /><button className="primary-button" onClick={() => void saveLabel()}>{copy.save}</button><select aria-label="Filter status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All decisions</option><option value="PROCEED">PROCEED</option><option value="DEFER">DEFER</option><option value="NOT_RECOMMENDED">NOT_RECOMMENDED</option><option value="PROCEED_WITH_MITIGATION">PROCEED_WITH_MITIGATION</option></select></div>
+    <section className="board-summary"><div><small>{copy.total}</small><strong>{summary.totalAnalyses}</strong></div><div className="summary-sentence"><strong>{(summary.byRiskLabel.HIGH ?? 0) + (summary.byRiskLabel.VERY_HIGH ?? 0)}</strong> {copy.high}</div></section>
+    {error && <p className="board-error">{error}</p>}{loading ? <p className="board-empty">Loading…</p> : analyses.length === 0 ? <p className="board-empty">{copy.empty}</p> : <><TrackingMap analyses={analyses} /><section className="board-table-wrap"><h2>{copy.table}</h2><table><thead><tr><th>{copy.location}</th><th>{copy.activity}</th><th>{copy.schedule}</th><th>{copy.decision}</th><th>{copy.risk}</th><th>{copy.confidence}</th><th>{copy.action}</th></tr></thead><tbody>{analyses.map((a) => <tr key={a.id}><td>{a.locationName}</td><td>{a.activityName ?? '—'}</td><td>{a.timeWindow}</td><td><span className={`status-pill status-${a.decisionStatus.toLowerCase()}`}>{a.decisionStatus}</span></td><td className={`risk-${a.riskLabel.toLowerCase()}`}>{a.riskLabel} {a.riskScore !== undefined && `(${a.riskScore})`}</td><td>{a.confidence}</td><td>{a.publicToken && <a href={`/api/v1/reports/${a.publicToken}`} target="_blank" rel="noreferrer">{copy.report} ↗</a>}</td></tr>)}</tbody></table></section></>}
+    {shareOpen && <div className="share-modal" role="dialog" aria-modal="true"><div><h2>{copy.share}</h2><p>{copy.warning}</p><input readOnly value={shareUrl} /><div><button className="secondary-button" onClick={() => setShareOpen(false)}>{copy.cancel}</button><button className="primary-button" onClick={() => { void navigator.clipboard?.writeText(shareUrl); setShareOpen(false); }}>{copy.confirm}</button></div></div></div>}
+  </main>;
+}
+
 const demo: Analysis[] = [
   { id: 'a1', locationCode: 'DUMMY-KEL-1', locationName: 'Kelurahan Barat', riskLabel: 'LOW', decisionStatus: 'PROCEED', timeWindow: '08:00–10:00', confidence: 'HIGH', latitude: 0, longitude: -0.01 },
   { id: 'a2', locationCode: 'DUMMY-KEL-2', locationName: 'Kelurahan Timur', riskLabel: 'MODERATE', decisionStatus: 'PROCEED_WITH_MITIGATION', timeWindow: '10:00–12:00', confidence: 'MEDIUM', latitude: 0, longitude: 0.01 },
@@ -60,6 +114,7 @@ function App() {
     localStorage.setItem('weatherops-theme', dark ? 'dark' : 'light');
   }, [dark]);
   useEffect(() => { document.documentElement.lang = lang; localStorage.setItem('weatherops-language', lang); }, [lang]);
+  if (window.location.pathname === '/board') return <div className="site-shell"><BoardPage lang={lang} /></div>;
   return <div className="site-shell">
     <nav className="nav">
       <a className="brand" href="#" aria-label="WeatherOps home"><span className="brand-mark"><span>W</span></span><span>weather<span className="brand-muted">ops</span></span></a>

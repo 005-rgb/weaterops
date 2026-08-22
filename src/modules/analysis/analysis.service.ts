@@ -98,8 +98,10 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
     scheduledEnd: string;
     operationalImpact: OperationalImpactInput;
     locale: 'id' | 'en';
+    sessionKeyHash?: string | null;
   }): Promise<AnalysisResponse> {
     const resolved = await validateInput(input);
+    input.sessionKeyHash ??= null;
     let forecast: { slots: CanonicalWeatherSlot[]; weatherSnapshotId: string };
     try {
       forecast = await dependencies.weatherService.getForecastWithSnapshot(input.locationCode);
@@ -124,7 +126,7 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
       forecastHorizonEnd: new Date(Date.parse(input.scheduledEnd) + 24 * 60 * 60 * 1000).toISOString(),
     });
     const token = generatePublicToken();
-    const result = await dependencies.transaction!(async (client) => persist(client, input, resolved, forecast.weatherSnapshotId, decision, token));
+    const result = await dependencies.transaction!(async (client) => persist(client, { ...input, sessionKeyHash: input.sessionKeyHash ?? null }, resolved, forecast.weatherSnapshotId, decision, token));
     return {
       analysisId: result.analysisId,
       reportToken: token,
@@ -144,7 +146,7 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
 
 async function persist(
   client: PoolClient,
-  input: { locationCode: string; activityCode: string; scheduledStart: string; scheduledEnd: string; operationalImpact: OperationalImpactInput; locale: 'id' | 'en' },
+  input: { locationCode: string; activityCode: string; scheduledStart: string; scheduledEnd: string; operationalImpact: OperationalImpactInput; locale: 'id' | 'en'; sessionKeyHash: string | null },
   resolved: { activity: { id: string; activity_profile_code: string; version: number } },
   snapshotId: string,
   decision: DecisionEngineResult,
@@ -153,11 +155,11 @@ async function persist(
   const request = await client.query<{ id: string }>(
     `INSERT INTO analysis_requests
       (location_code, activity_id, activity_profile_code, activity_profile_version,
-       scheduled_start, scheduled_end, operational_impact, locale, resolution_level)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL) RETURNING id`,
+        scheduled_start, scheduled_end, operational_impact, locale, resolution_level, session_key_hash)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9) RETURNING id`,
     [input.locationCode, resolved.activity.id, resolved.activity.activity_profile_code,
       resolved.activity.version, input.scheduledStart, input.scheduledEnd,
-      input.operationalImpact, input.locale],
+      input.operationalImpact, input.locale, input.sessionKeyHash],
   );
   const analysisRequestId = request.rows[0].id;
   const result = await client.query<{ id: string }>(

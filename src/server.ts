@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 const app = createApp();
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist/frontend');
 app.use(express.static(frontendRoot));
+app.get(/^(?!\/api(?:\/|$)).*/, (_request, response) => {
+  response.sendFile(path.join(frontendRoot, 'index.html'));
+});
 
 try {
   const version = await getPostgisVersion();
