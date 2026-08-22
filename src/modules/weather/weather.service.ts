@@ -46,6 +46,14 @@ export class WeatherService {
   }
 
   async getForecastForLocation(locationCode: string): Promise<CanonicalWeatherSlot[]> {
+    const result = await this.getForecastWithSnapshot(locationCode);
+    return result.slots;
+  }
+
+  async getForecastWithSnapshot(locationCode: string): Promise<{
+    slots: CanonicalWeatherSlot[];
+    weatherSnapshotId: string;
+  }> {
     let latest: WeatherSnapshot | null;
     try {
       latest = await this.options.snapshots.findLatestByLocation(locationCode);
@@ -54,7 +62,7 @@ export class WeatherService {
     }
     if (latest && this.isFresh(latest)) {
       console.log(JSON.stringify({ level: 'debug', event: 'weather_cache_hit', locationCode }));
-      return this.asCanonical(latest.normalized_data);
+      return { slots: this.asCanonical(latest.normalized_data), weatherSnapshotId: latest.id };
     }
     console.log(JSON.stringify({ level: 'debug', event: 'weather_cache_miss', locationCode }));
     let raw;
@@ -95,7 +103,7 @@ export class WeatherService {
     } catch (error) {
       throw new WeatherServiceError('WEATHER_CACHE_ERROR', 'Unable to persist weather snapshot', error);
     }
-    return normalized;
+    return { slots: normalized, weatherSnapshotId: snapshot.id };
   }
 
   private isFresh(snapshot: WeatherSnapshot): boolean {

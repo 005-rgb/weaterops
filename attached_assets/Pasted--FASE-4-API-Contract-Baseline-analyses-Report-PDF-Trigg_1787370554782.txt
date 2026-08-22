@@ -1,0 +1,194 @@
+# FASE 4 — API Contract Baseline (`/analyses`, Report, PDF Trigger)
+
+**Prasyarat:** Fase 1 (data model), Fase 2 (weather service), Fase 3 (decision engine)
+selesai dan lulus test masing-masing.
+**Output fase ini:** Endpoint API fungsional end-to-end pertama — dari request user
+sampai laporan tersimpan. Ini titik integrasi pertama seluruh modul sebelumnya.
+
+---
+
+## PROMPT UNTUK REPLIT AI
+
+```
+Ini FASE 4 dari 11 fase pembangunan WeatherOps. Kamu MENGINTEGRASIKAN modul
+`weather` (Fase 2) dan `decision-engine` (Fase 3) di belakang endpoint API nyata,
+menyimpan hasilnya ke tabel yang dibuat Fase 1. JANGAN implementasikan peta,
+session board, i18n penuh, anti-abuse, atau tracing di fase ini (itu fase 5-9) —
+tapi SIAPKAN titik ekstensi (extension point) yang jelas untuk fitur-fitur itu
+supaya tidak perlu refactor besar nanti (mis. controller sudah menerima
+`Accept-Language` header meski belum dipakai penuh, sudah ada tempat untuk
+middleware anti-abuse meski belum aktif).
+
+## 1. Arsitektur wajib (§7.3)
+Controller HANYA: parsing request, invoke validation, invoke service, mapping
+response. JANGAN taruh logika bisnis di controller. Service HANYA orkestrasi
+(panggil weather service, decision engine, repository) — decision engine sendiri
+TETAP pure seperti Fase 3, jangan diubah untuk "kemudahan" integrasi.
+
+## 2. Endpoint: `POST /api/v1/analyses`
+
+### Request body
+```json
+{
+  "locationCode": "string (adm4 code)",
+  "activityCode": "string",
+  "scheduledStart": "ISO 8601 datetime",
+  "scheduledEnd": "ISO 8601 datetime",
+  "operationalImpact": { "...": "sesuai struktur OperationalImpactInput dari Fase 3" }
+}
+```
+Header opsional: `Accept-Language: id|en` (default 'id' jika absen/tidak dikenal).
+
+### Validasi (sebelum masuk ke service)
+- `locationCode` harus ada di tabel `locations` DAN `level = 'adm4'` (jika bukan
+  adm4, kembalikan error jelas — jangan diam-diam fallback).
+- `scheduledEnd` harus setelah `scheduledStart`.
+- `scheduledStart` tidak boleh di masa lalu (bandingkan dengan waktu server saat
+  request diterima — INI SATU-SATUNYA tempat `Date.now()` boleh dipanggil dalam
+  seluruh alur, DI CONTROLLER/SERVICE, bukan di decision engine).
+- `activityCode` harus merujuk ke `activities` yang aktif.
+- Gunakan `zod` untuk schema validasi, kembalikan error 400 dengan detail field
+  yang gagal jika validasi gagal.
+
+### Alur service (`analysis.service.ts`)
+1. Resolve `activityCode` -> `activity_profile_code` + `activity_profile_version`
+   (ambil versi AKTIF saat ini, catat versi persis yang dipakai — jangan resolve
+   ulang versi di titik lain proses ini, supaya konsisten §84).
+2. Panggil `weatherService.getForecastForLocation(locationCode)` (Fase 2) ->
+   dapatkan `CanonicalWeatherSlot[]` + `weatherSnapshotId`.
+3. Panggil `decisionEngine.evaluateDecision({...})` (Fase 3, PURE, tanpa I/O) ->
+   dapatkan `DecisionEngineResult`.
+4. Simpan dalam SATU TRANSAKSI DATABASE (§71 Transaction Boundaries):
+   - insert `analysis_requests`
+   - insert `analysis_results` (dengan `public_token` baru, random, unguessable —
+     pakai util dari Fase 1)
+   - insert `decision_reasons` (banyak baris, dari `DecisionEngineResult.reasons`)
+   - insert `evidence` (banyak baris, terhubung ke `decision_reasons`)
+   Jika ADA SATU SAJA insert yang gagal, ROLLBACK SEMUA — jangan biarkan hasil
+   parsial tersimpan (§30 Immutability, §71).
+5. Return response.
+
+### Response sukses (201)
+```json
+{
+  "analysisId": "uuid",
+  "reportToken": "public_token value",
+  "status": "completed",
+  "resolutionLevel": null,
+  "decision": {
+    "status": "DEFER",
+    "riskScore": 81,
+    "riskLabel": "VERY_HIGH",
+    "confidence": "HIGH"
+  }
+}
+```
+(`resolutionLevel` tetap ada di response sekarang meski selalu null — field ini
+diisi nyata di Fase 6 geospasial, JANGAN hapus dari kontrak response supaya
+frontend Fase 10 tidak perlu ubah shape response nanti.)
+
+### Idempotency & Retry (§70)
+- Jika request BMKG gagal total (setelah retry Fase 2 habis) SEBELUM decision
+  engine sempat jalan, JANGAN simpan analysis_request sebagai gagal permanen —
+  kembalikan error 503 `WEATHER_SOURCE_UNAVAILABLE` yang mengizinkan user retry
+  dari awal (§46 Failure UX prinsipnya, detail penuh Fase berikutnya).
+- Endpoint ini TIDAK idempotent by design (setiap POST = analysis baru) — JANGAN
+  tambahkan idempotency key kompleks di fase ini kecuali PRD memintanya eksplisit
+  (tidak diminta), cukup pastikan tidak ada duplikat data akibat retry client yang
+  gagal di tengah (transaksi di poin 4 sudah menjamin ini).
+
+## 3. Endpoint: `GET /api/v1/analyses/:id/report`
+- Akses via `public_token` (SEBAGAI query param ATAU header `Authorization` —
+  putuskan satu, dokumentasikan; untuk endpoint report HTML publik yang biasa
+  dibuka langsung di browser, gunakan token di PATH, mis.
+  `GET /api/v1/reports/:publicToken`, BUKAN `:id` — perjelas ini di kode karena
+  `id` internal (UUID DB) TIDAK BOLEH ter-expose sebagai cara akses publik,
+  hanya `public_token` yang boleh dipakai user luar).
+- Jika `report_snapshots` untuk analysis ini SUDAH ada (immutable, §30), kembalikan
+  yang sudah ada — JANGAN generate ulang/render ulang dari data lain (§72, §73 No
+  Silent Recalculation).
+- Jika BELUM ada, render report HTML dari `analysis_results` + `decision_reasons`
+  + `evidence` (join lengkap), simpan sebagai `report_snapshots` baru (locale
+  default 'id' untuk fase ini — Fase 5 memperluas locale switching), lalu
+  kembalikan.
+- Jika `public_token` tidak ditemukan atau `analysis_results.deleted_at` tidak
+  null -> 404, JANGAN bocorkan apakah token pernah ada atau tidak (respons 404
+  generik yang sama untuk "tidak pernah ada" dan "sudah dihapus").
+- Jika `expires_at` sudah lewat -> 410 Gone, bukan 404 (beda semantik: pernah ada,
+  sekarang hilang by design).
+
+### Report HTML content (§29 Report Spec, minimal viable untuk fase ini)
+Render minimal: ringkasan keputusan (status, risk score, risk label, confidence),
+daftar reasons dengan severity, jendela alternatif jika ada, timestamp analysis,
+disclaimer placeholder (teks lengkap disclaimer hukum final dikerjakan Fase 11
+§64a.4, untuk sekarang cukup taruh teks generik yang JELAS ditandai
+`// TODO Fase 11: ganti dengan disclaimer final hasil review hukum`).
+JANGAN taruh teks bebas untuk reason — render dari `code` + `params` memakai
+lookup SEDERHANA sementara (object literal ID saja) yang AKAN diganti total oleh
+translation catalog di Fase 5 — TANDAI eksplisit di kode bahwa ini implementasi
+sementara.
+
+## 4. Endpoint: `POST /api/v1/analyses/:publicToken/report.pdf` (trigger, bukan generate sync)
+- Untuk fase ini, cukup buat endpoint yang MEMANGGIL fungsi generate PDF
+  placeholder (bisa pakai library PDF generation sederhana seperti `puppeteer`
+  render dari report HTML yang sudah ada, atau `pdfkit` — pilih SATU dan
+  dokumentasikan; implementasi PDF penuh dengan styling final adalah bagian
+  Fase 10, untuk fase ini fokus pada MEKANISME: endpoint menerima request,
+  memicu generation, menyimpan hasil ke `report_snapshots.pdf_url`,
+  mengembalikan URL).
+- Response: `{ "pdfUrl": "string" }` atau 202 Accepted dengan status jika
+  generation async (pilih sync untuk fase ini demi kesederhanaan, JANGAN
+  over-engineer dengan job queue kecuali PRD nanti eksplisit memintanya).
+
+## 5. Error codes (§32a, gunakan format ini konsisten untuk SEMUA error di fase ini dan seterusnya)
+```json
+{ "error": { "code": "VALIDATION_FAILED", "message": "string", "details": {} } }
+```
+Daftarkan kode yang dipakai fase ini di `src/shared/errors/error-codes.ts`:
+`VALIDATION_FAILED`, `LOCATION_NOT_FOUND`, `ACTIVITY_NOT_FOUND`,
+`WEATHER_SOURCE_UNAVAILABLE`, `BMKG_SCHEMA_VALIDATION_FAILED` (diteruskan dari
+Fase 2), `REPORT_NOT_FOUND`, `REPORT_EXPIRED`, `INTERNAL_ERROR`.
+File ini akan DIPERLUAS (bukan diganti) oleh fase-fase berikutnya
+(`LOCATION_RESOLUTION_FAILED`, `ANTI_ABUSE_CHALLENGE_REQUIRED`, dll) — desain
+sekarang agar mudah ditambah tanpa breaking change.
+
+## 6. Golden test cases end-to-end (§54, level integrasi — beda dari unit test Fase 3)
+Gunakan seed data Fase 1 + fixture BMKG Fase 2 untuk menguji ALUR PENUH:
+1. POST /analyses dengan input valid, cuaca cerah -> 201, decision PROCEED,
+   data tersimpan benar di 4 tabel (`analysis_requests`, `analysis_results`,
+   `decision_reasons`, `evidence`) — assert isi tabel langsung, bukan hanya
+   response API.
+2. POST /analyses dengan `locationCode` tidak ada -> 400/404 `LOCATION_NOT_FOUND`,
+   pastikan TIDAK ADA baris tersimpan di tabel manapun (transaksi tidak jalan
+   sama sekali karena validasi gagal sebelum service dipanggil).
+3. Simulasikan BMKG gagal total -> 503 `WEATHER_SOURCE_UNAVAILABLE`, pastikan
+   TIDAK ADA baris analysis_results tersimpan (rollback bekerja / tidak pernah
+   mulai transaksi).
+4. GET /reports/:publicToken untuk report yang sudah pernah dibuat -> hasil KEDUA
+   kali panggil harus IDENTIK byte-per-byte dengan hasil PERTAMA (bukti §73 no
+   silent recalculation — assert HTML string sama persis, bukan hanya status 200).
+5. GET /reports/:publicToken dengan token acak yang tidak pernah ada -> 404.
+6. GET /reports/:publicToken untuk analysis yang `expires_at` sudah lewat
+   (manipulasi langsung di test DB) -> 410.
+7. Test transaksi rollback: simulasikan insert `evidence` gagal (mock/force
+   error) di tengah proses -> assert TIDAK ADA baris tersisa di
+   `analysis_requests`, `analysis_results`, ATAUPUN `decision_reasons` (semua
+   ter-rollback, tidak ada data yatim).
+
+## Definition of Done
+- [ ] POST /analyses berfungsi end-to-end dari request sampai data tersimpan di
+      4 tabel dalam satu transaksi.
+- [ ] GET /reports/:publicToken mengembalikan HTML konsisten, tidak pernah
+      re-render setelah snapshot pertama ada.
+- [ ] Semua 7 golden test case integrasi di atas lulus.
+- [ ] Rollback transaksi terbukti bekerja (test eksplisit ada, bukan asumsi).
+- [ ] Format error konsisten di semua endpoint sesuai §32a.
+- [ ] `public_token` yang dipakai untuk akses publik, `id` internal TIDAK PERNAH
+      ter-expose di response manapun ke endpoint publik.
+- [ ] `npm run typecheck` bersih, `npm test` lulus semua.
+
+Laporkan: contoh response aktual untuk ketiga skenario utama (sukses, weather
+gagal, report sudah ada), hasil test rollback, dan konfirmasi tidak ada data
+yatim di database setelah test suite selesai (query manual COUNT per tabel
+sebelum/sesudah test). Jangan lanjut ke Fase 5 tanpa instruksi eksplisit.
+```

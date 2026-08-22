@@ -51,6 +51,30 @@ Provider API dapat dikelola melalui `GET/POST /api/v1/weather/sources`,
 `PATCH /api/v1/weather/sources/:id`, dan `DELETE /api/v1/weather/sources/:id`.
 Delete bersifat soft-delete (`enabled=false`) sehingga histori tidak hilang.
 
-Phase 0 hanya menyediakan scaffold, database migration PostGIS, middleware
-dasar, dan endpoint health check. Logika bisnis dan integrasi BMKG belum
-diimplementasikan.
+## Fase 4 — analisis dan report
+
+Endpoint analisis:
+
+```text
+POST /api/v1/analyses
+GET  /api/v1/reports/:publicToken
+POST /api/v1/reports/:publicToken/report.pdf
+```
+
+`POST /analyses` memvalidasi lokasi adm4, activity aktif, waktu terjadwal, dan
+menyimpan request, hasil, reasons, serta evidence dalam satu transaksi. Report
+HTML dibuat sekali dan dibaca kembali dari `report_snapshots` pada request
+berikutnya, sehingga tidak ada silent recalculation. Endpoint PDF saat ini
+menggunakan generator synchronous placeholder berbentuk data URL; renderer PDF
+ber-styling final direncanakan untuk Fase 10.
+
+`publicToken` adalah satu-satunya jalur akses report publik; UUID internal tidak
+dipakai sebagai jalur tersebut. Error API menggunakan bentuk:
+
+```json
+{ "error": { "code": "VALIDATION_FAILED", "message": "..." } }
+```
+
+Migrasi database dan golden integration tests memerlukan `DATABASE_URL` dengan
+PostgreSQL/PostGIS aktif. Tanpa koneksi tersebut, unit test/typecheck/lint tetap
+dapat dijalankan, tetapi endpoint database akan berstatus degraded.

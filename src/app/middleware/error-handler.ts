@@ -1,4 +1,6 @@
 import type { ErrorRequestHandler } from 'express';
+import { ZodError } from 'zod';
+import { ApiError } from '../../shared/errors/error-codes.js';
 
 export const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
   void next;
@@ -9,6 +11,22 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
       message: error instanceof Error ? error.message : 'Unknown error',
     }),
   );
+  if (error instanceof ApiError) {
+    response.status(error.statusCode).json({
+      error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) },
+    });
+    return;
+  }
+  if (error instanceof ZodError) {
+    response.status(400).json({
+      error: {
+        code: 'VALIDATION_FAILED',
+        message: 'Request validation failed',
+        details: error.flatten(),
+      },
+    });
+    return;
+  }
   response.status(500).json({
     error: {
       code: 'INTERNAL_ERROR',
