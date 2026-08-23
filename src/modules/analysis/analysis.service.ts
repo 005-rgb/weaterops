@@ -35,8 +35,24 @@ export interface AnalysisResponse {
     riskScore: number;
     riskLabel: string;
     confidence: string;
+    alternativeWindows: DecisionEngineResult['alternativeWindows'];
+    weather: {
+      snapshotAgeMinutes: number;
+      slotCoverage: { complete: boolean; ratio: number };
+      fetchedAt: string;
+      sourceUpdatedAt: string | null;
+    };
   };
 }
+
+type ForecastResult = {
+  slots: CanonicalWeatherSlot[];
+  weatherSnapshotId: string;
+  snapshotAgeMinutes?: number;
+  slotCoverage?: { complete: boolean; ratio: number };
+  fetchedAt?: Date;
+  sourceUpdatedAt?: Date | null;
+};
 
 function defaultWeatherService() {
   return new WeatherService({
@@ -103,7 +119,7 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
   }): Promise<AnalysisResponse> {
     const resolved = await validateInput(input);
     input.sessionKeyHash ??= null;
-    let forecast: { slots: CanonicalWeatherSlot[]; weatherSnapshotId: string };
+    let forecast: ForecastResult;
     try {
       forecast = await dependencies.weatherService.getForecastWithSnapshot(input.locationCode);
     } catch (error) {
@@ -126,6 +142,8 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
         scheduledWindow: { start: input.scheduledStart, end: input.scheduledEnd },
         operationalImpact: input.operationalImpact,
         forecastHorizonEnd: new Date(Date.parse(input.scheduledEnd) + 24 * 60 * 60 * 1000).toISOString(),
+        snapshotAgeMinutes: forecast.snapshotAgeMinutes ?? Number.NaN,
+        slotCoverage: forecast.slotCoverage ?? { complete: false, ratio: 0 },
       });
       span.setAttributes({
         'decision.status': value.decisionStatus,
@@ -135,7 +153,20 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
       return value;
     });
     const token = generatePublicToken();
-    const result = await dependencies.transaction!(async (client) => persist(client, { ...input, sessionKeyHash: input.sessionKeyHash ?? null }, resolved, forecast.weatherSnapshotId, decision, token));
+    const result = await dependencies.transaction!(async (client) => persist(
+      client,
+      { ...input, sessionKeyHash: input.sessionKeyHash ?? null },
+      resolved,
+      forecast.weatherSnapshotId,
+      decision,
+      token,
+      {
+        snapshotAgeMinutes: forecast.snapshotAgeMinutes ?? Number.NaN,
+        slotCoverage: forecast.slotCoverage ?? { complete: false, ratio: 0 },
+        fetchedAt: forecast.fetchedAt?.toISOString() ?? null,
+        sourceUpdatedAt: forecast.sourceUpdatedAt?.toISOString() ?? null,
+      },
+    ));
     return {
       analysisId: result.analysisId,
       reportToken: token,
@@ -146,6 +177,13 @@ export function createAnalysisService(overrides: Partial<AnalysisDependencies> =
         riskScore: decision.riskScore,
         riskLabel: decision.riskLabel,
         confidence: decision.confidence,
+          alternativeWindows: decision.alternativeWindows,
+          weather: {
+            snapshotAgeMinutes: forecast.snapshotAgeMinutes ?? Number.NaN,
+            slotCoverage: forecast.slotCoverage ?? { complete: false, ratio: 0 },
+            fetchedAt: forecast.fetchedAt?.toISOString() ?? new Date().toISOString(),
+            sourceUpdatedAt: forecast.sourceUpdatedAt?.toISOString() ?? null,
+          },
       },
     };
   }
@@ -160,6 +198,12 @@ async function persist(
   snapshotId: string,
   decision: DecisionEngineResult,
   token: string,
+  metadata: {
+    snapshotAgeMinutes: number;
+    slotCoverage: { complete: boolean; ratio: number };
+    fetchedAt: string | null;
+    sourceUpdatedAt: string | null;
+  },
 ) {
   const request = await client.query<{ id: string }>(
     `INSERT INTO analysis_requests
@@ -173,13 +217,20 @@ async function persist(
   const analysisRequestId = request.rows[0].id;
   const result = await client.query<{ id: string }>(
     `INSERT INTO analysis_results
-      (analysis_request_id, weather_snapshot_id, decision_status, risk_score, risk_label,
-       confidence, scoring_version, decision_engine_version, public_token)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+       (analysis_request_id, weather_snapshot_id, decision_status, risk_score, risk_label,
+        confidence, scoring_version, decision_engine_version, public_token, metadata)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
     [analysisRequestId, snapshotId, decision.decisionStatus, decision.riskScore, decision.riskLabel,
-      decision.confidence, SCORING_VERSION, DECISION_ENGINE_VERSION, token],
+      decision.confidence, SCORING_VERSION, DECISION_ENGINE_VERSION, token, {
+        ...metadata,
+        alternativeWindows: decision.alternativeWindows,
+      }],
   );
   const analysisResultId = result.rows[0].id;
+  await client.query(
+    `INSERT INTO system_events (trace_id, event_type, payload) VALUES ($1, $2, $3)`,
+    [currentTraceId(), 'analysis.created', { analysis_id: analysisRequestId, result_id: analysisResultId }],
+  );
   for (const reason of decision.reasons) {
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO decision_reasons (analysis_result_id, code, severity, params)
@@ -187,10 +238,6 @@ async function persist(
       [analysisResultId, reason.code, reason.severity, reason.params],
     );
     for (const reference of reason.evidenceRefs) {
-   await client.query(
-     `INSERT INTO system_events (trace_id, event_type, payload) VALUES ($1, $2, $3)`,
-     [currentTraceId(), 'analysis.created', { analysis_id: analysisRequestId }],
-   );
    await client.query(
         `INSERT INTO evidence (decision_reason_id, evidence_type, reference_id, snapshot_data)
          VALUES ($1,$2,$3,$4)`,

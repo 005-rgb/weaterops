@@ -54,6 +54,10 @@ export class WeatherService {
   async getForecastWithSnapshot(locationCode: string): Promise<{
     slots: CanonicalWeatherSlot[];
     weatherSnapshotId: string;
+    snapshotAgeMinutes: number;
+    slotCoverage: { complete: boolean; ratio: number };
+    fetchedAt: Date;
+    sourceUpdatedAt: Date | null;
   }> {
     let latest: WeatherSnapshot | null;
     try {
@@ -67,7 +71,15 @@ export class WeatherService {
     }
     if (latest && this.isFresh(latest)) {
       console.log(JSON.stringify({ level: 'debug', event: 'weather_cache_hit', locationCode }));
-      return { slots: this.asCanonical(latest.normalized_data), weatherSnapshotId: latest.id };
+      const slots = this.asCanonical(latest.normalized_data);
+      return {
+        slots,
+        weatherSnapshotId: latest.id,
+        snapshotAgeMinutes: this.ageMinutes(latest.fetched_at),
+        slotCoverage: this.coverage(slots),
+        fetchedAt: new Date(latest.fetched_at),
+        sourceUpdatedAt: latest.source_updated_at ? new Date(latest.source_updated_at) : null,
+      };
     }
     console.log(JSON.stringify({ level: 'debug', event: 'weather_cache_miss', locationCode }));
     let raw;
@@ -98,29 +110,52 @@ export class WeatherService {
     const sourceUpdatedAt = getSourceUpdatedAt(raw);
     let snapshot: WeatherSnapshot;
     try {
-      snapshot = await this.options.snapshots.create({
+      const snapshotData = {
         location_code: locationCode,
         source: this.options.sourceCode ?? 'BMKG',
         raw_response: raw,
         normalized_data: normalized,
         source_updated_at: sourceUpdatedAt,
-      });
-      await Promise.all(normalized.flatMap((slot) => {
+      };
+      const slotData = normalized.flatMap((slot) => {
         if (slot.localDatetime === null) return [];
-        return [this.options.slots.create({
-          weather_snapshot_id: snapshot.id,
+        return [{
           location_code: slot.locationCode,
           local_datetime: new Date(slot.localDatetime),
           weather_desc: slot.weatherDesc ?? '',
           // This column predates the decision engine; 0 is neutral storage, not a decision.
           hazard_score: 0,
           raw_fields: slot,
-        })];
+        }];
       }));
+      if (this.options.snapshots.createWithSlots) {
+        snapshot = await this.options.snapshots.createWithSlots(snapshotData, slotData);
+      } else {
+        snapshot = await this.options.snapshots.create(snapshotData);
+        await Promise.all(slotData.map((slot) => this.options.slots.create({ ...slot, weather_snapshot_id: snapshot.id })));
+      }
     } catch (error) {
       throw new WeatherServiceError('WEATHER_CACHE_ERROR', 'Unable to persist weather snapshot', error);
     }
-    return { slots: normalized, weatherSnapshotId: snapshot.id };
+    return {
+      slots: normalized,
+      weatherSnapshotId: snapshot.id,
+      snapshotAgeMinutes: this.ageMinutes(snapshot.fetched_at),
+      slotCoverage: this.coverage(normalized),
+      fetchedAt: new Date(snapshot.fetched_at),
+      sourceUpdatedAt: snapshot.source_updated_at ? new Date(snapshot.source_updated_at) : null,
+    };
+  }
+
+  private ageMinutes(value: Date): number {
+    return Math.max(0, (this.now().getTime() - new Date(value).getTime()) / 60_000);
+  }
+
+  private coverage(slots: CanonicalWeatherSlot[]): { complete: boolean; ratio: number } {
+    if (!slots.length) return { complete: false, ratio: 0 };
+    const dated = slots.filter((slot) => slot.localDatetime !== null).length;
+    const ratio = dated / slots.length;
+    return { complete: dated === slots.length, ratio };
   }
 
   private isFresh(snapshot: WeatherSnapshot): boolean {

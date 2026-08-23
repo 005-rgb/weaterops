@@ -1,4 +1,5 @@
-import { pool } from '../../infrastructure/database/client.js';
+import { pool, withTransaction } from '../../infrastructure/database/client.js';
+import type { PoolClient } from 'pg';
 import { createRepository, type Repository } from '../../infrastructure/database/repository.js';
 
 export interface WeatherSnapshot {
@@ -47,6 +48,7 @@ export const weatherApiResponsesRepository: Repository<WeatherApiResponse> = cre
 export interface WeatherSnapshotRepository {
   findLatestByLocation(locationCode: string): Promise<WeatherSnapshot | null>;
   create(data: Partial<WeatherSnapshot>): Promise<WeatherSnapshot>;
+  createWithSlots?(data: Partial<WeatherSnapshot>, slots: Array<Partial<WeatherSlot>>): Promise<WeatherSnapshot>;
 }
 
 export interface WeatherSlotRepository {
@@ -78,12 +80,19 @@ export const weatherSourcesRepository = createRepository<WeatherSource>(
 export const weatherSnapshotStore: WeatherSnapshotRepository = {
   async findLatestByLocation(locationCode) {
     const result = await pool.query(
-      'SELECT * FROM weather_snapshots WHERE location_code = $1 ORDER BY fetched_at DESC LIMIT 1',
+      'SELECT * FROM weather_snapshots WHERE location_code = $1 AND expires_at > now() ORDER BY fetched_at DESC LIMIT 1',
       [locationCode],
     );
     return (result.rows[0] as WeatherSnapshot | undefined) ?? null;
   },
   create: (data) => weatherSnapshotsRepository.create(data),
+  async createWithSlots(data, slots) {
+    return withTransaction(async (client) => {
+      const snapshot = await insertSnapshot(client, data);
+      for (const slot of slots) await insertSlot(client, { ...slot, weather_snapshot_id: snapshot.id });
+      return snapshot;
+    });
+  },
 };
 
 export const weatherSlotStore: WeatherSlotRepository = {
@@ -93,3 +102,25 @@ export const weatherSlotStore: WeatherSlotRepository = {
 export const weatherApiResponseStore: WeatherApiResponseRepository = {
   create: (data) => weatherApiResponsesRepository.create(data),
 };
+
+async function insertSnapshot(client: PoolClient, data: Partial<WeatherSnapshot>): Promise<WeatherSnapshot> {
+  const result = await client.query<WeatherSnapshot>(
+    `INSERT INTO weather_snapshots
+      (location_code, source, raw_response, normalized_data, source_updated_at, fetched_at)
+     VALUES ($1, $2, $3, $4, $5, COALESCE($6, now())) RETURNING *`,
+    [data.location_code, data.source ?? 'BMKG', data.raw_response, data.normalized_data,
+      data.source_updated_at ?? null, data.fetched_at ?? null],
+  );
+  return result.rows[0];
+}
+
+async function insertSlot(client: PoolClient, data: Partial<WeatherSlot>): Promise<WeatherSlot> {
+  const result = await client.query<WeatherSlot>(
+    `INSERT INTO weather_slots
+      (weather_snapshot_id, location_code, local_datetime, weather_desc, hazard_score, raw_fields)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [data.weather_snapshot_id, data.location_code, data.local_datetime, data.weather_desc ?? '',
+      data.hazard_score ?? 0, data.raw_fields],
+  );
+  return result.rows[0];
+}

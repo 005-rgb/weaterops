@@ -43,6 +43,16 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
       .join('; ');
     throw new Error(`Invalid environment configuration: ${message}`);
   }
+  if (result.data.NODE_ENV === 'production') {
+    const insecureDefaults = [
+      ['SESSION_KEY_SALT', result.data.SESSION_KEY_SALT, 'weatherops-development-salt'],
+      ['IP_HASH_SALT', result.data.IP_HASH_SALT, 'weatherops-ip-development-salt'],
+    ] as const;
+    const invalid = insecureDefaults.filter(([, value, fallback]) => value === fallback).map(([name]) => name);
+    if (invalid.length) {
+      throw new Error(`Invalid environment configuration: ${invalid.join(', ')} must be set to production-only secrets`);
+    }
+  }
   return result.data;
 }
 
